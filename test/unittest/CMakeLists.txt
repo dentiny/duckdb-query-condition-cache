@@ -5,7 +5,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src/include)
 include_directories(${DuckDB_SOURCE_DIR}/third_party)
 include_directories(${DuckDB_SOURCE_DIR}/test/include)
 
-set(QUERY_CACHE_UNITTEST_OBJECTS main.cpp)
+set(QUERY_CACHE_UNITTEST_OBJECTS main.cpp test_bitvector.cpp)
 
 add_executable(unittest_query_condition_cache ${QUERY_CACHE_UNITTEST_OBJECTS})
 

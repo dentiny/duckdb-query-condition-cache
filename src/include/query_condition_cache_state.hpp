@@ -10,8 +10,10 @@ namespace duckdb {
 // Derived from DuckDB's compile-time configurable constants
 static constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
 static constexpr idx_t BITVECTOR_WORDS = (VECTORS_PER_ROW_GROUP + 63) / 64;
+static_assert(VECTORS_PER_ROW_GROUP > 0, "VECTORS_PER_ROW_GROUP must be positive");
 
-// Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row.
+// Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row,
+// for 0 <= i < VECTORS_PER_ROW_GROUP. Callers must not pass out-of-range indices;
 // Backed by array<uint64_t, N> to support configurable row group / vector sizes.
 struct RowGroupBitvector {
 	array<uint64_t, BITVECTOR_WORDS> words = {};
@@ -38,11 +40,7 @@ struct RowGroupBitvector {
 	idx_t CountSetBits() const {
 		idx_t count = 0;
 		for (auto &w : words) {
-			uint64_t v = w;
-			while (v) {
-				count += v & 1ULL;
-				v >>= 1;
-			}
+			count += static_cast<idx_t>(__builtin_popcountll(w));
 		}
 		return count;
 	}
