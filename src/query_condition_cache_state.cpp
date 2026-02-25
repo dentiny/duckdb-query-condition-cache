@@ -2,11 +2,40 @@
 
 namespace duckdb {
 
-// Thread-local build capture state
-thread_local BuildCaptureState tl_build_capture;
+// ------- ROW_GROUP_BITVECTOR -------
 
-// Thread-local pending cache injections (pre-optimize → post-optimize handoff)
-thread_local unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> tl_lookup_pending;
+bool RowGroupBitvector::VectorHasRows(idx_t vector_index) const {
+	D_ASSERT(vector_index < VECTORS_PER_ROW_GROUP);
+	return (words[vector_index / 64] >> (vector_index % 64)) & 1ULL;
+}
+
+void RowGroupBitvector::SetVector(idx_t vector_index) {
+	D_ASSERT(vector_index < VECTORS_PER_ROW_GROUP);
+	words[vector_index / 64] |= (1ULL << (vector_index % 64));
+}
+
+bool RowGroupBitvector::IsEmpty() const {
+	for (auto &w : words) {
+		if (w != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+idx_t RowGroupBitvector::CountSetBits() const {
+	idx_t count = 0;
+	for (auto &w : words) {
+		uint64_t v = w;
+		while (v) {
+			v &= v - 1;
+			++count;
+		}
+	}
+	return count;
+}
+
+// ------- CONDITION_CACHE_STORE -------
 
 shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(const string &filter_key) {
 	lock_guard<mutex> guard(cache_lock);
@@ -17,11 +46,11 @@ shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(const string &filter
 	return nullptr;
 }
 
-vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::LookupByTable(const string &table_name) {
+vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::LookupByTable(idx_t table_oid) {
 	lock_guard<mutex> guard(cache_lock);
 	vector<shared_ptr<ConditionCacheEntry>> result;
 	for (auto &pair : entries) {
-		if (pair.second->table_name == table_name) {
+		if (pair.second->table_oid == table_oid) {
 			result.push_back(pair.second);
 		}
 	}
@@ -30,7 +59,10 @@ vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::LookupByTable(const
 
 void ConditionCacheStore::Insert(shared_ptr<ConditionCacheEntry> entry) {
 	lock_guard<mutex> guard(cache_lock);
-	entries[entry->filter_key] = std::move(entry);
+	auto result = entries.emplace(entry->filter_key, entry);
+	if (!result.second) {
+		result.first->second = std::move(entry);
+	}
 }
 
 void ConditionCacheStore::Clear() {
@@ -39,11 +71,13 @@ void ConditionCacheStore::Clear() {
 }
 
 vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::GetAll() {
-	lock_guard<mutex> guard(cache_lock);
 	vector<shared_ptr<ConditionCacheEntry>> result;
-	result.reserve(entries.size());
-	for (auto &pair : entries) {
-		result.push_back(pair.second);
+	{
+		lock_guard<mutex> guard(cache_lock);
+		result.reserve(entries.size());
+		for (auto &pair : entries) {
+			result.push_back(pair.second);
+		}
 	}
 	return result;
 }

@@ -8,69 +8,34 @@
 namespace duckdb {
 
 // Derived from DuckDB's compile-time configurable constants
-static constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
-static constexpr idx_t BITVECTOR_WORDS = (VECTORS_PER_ROW_GROUP + 63) / 64;
-static_assert(VECTORS_PER_ROW_GROUP > 0, "VECTORS_PER_ROW_GROUP must be positive");
+inline constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
+inline constexpr idx_t BITVECTOR_WORDS = (VECTORS_PER_ROW_GROUP + 63) / 64;
+static_assert(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE == 0,
+              "DEFAULT_ROW_GROUP_SIZE must be divisible by STANDARD_VECTOR_SIZE");
 
 // Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row,
 // for 0 <= i < VECTORS_PER_ROW_GROUP. Callers must not pass out-of-range indices;
+// D_ASSERT enforces this in debug builds only.
 // Backed by array<uint64_t, N> to support configurable row group / vector sizes.
 struct RowGroupBitvector {
 	array<uint64_t, BITVECTOR_WORDS> words = {};
 
-	bool VectorHasRows(idx_t vector_index) const {
-		D_ASSERT(vector_index < VECTORS_PER_ROW_GROUP);
-		return (words[vector_index / 64] >> (vector_index % 64)) & 1ULL;
-	}
-
-	void SetVector(idx_t vector_index) {
-		D_ASSERT(vector_index < VECTORS_PER_ROW_GROUP);
-		words[vector_index / 64] |= (1ULL << (vector_index % 64));
-	}
-
-	bool IsEmpty() const {
-		for (auto &w : words) {
-			if (w != 0) {
-				return false;
-			}
-		}
-		return true;
-	}
-
-	idx_t CountSetBits() const {
-		idx_t count = 0;
-		for (auto &w : words) {
-			count += static_cast<idx_t>(__builtin_popcountll(w));
-		}
-		return count;
-	}
+	bool VectorHasRows(idx_t vector_index) const;
+	void SetVector(idx_t vector_index);
+	bool IsEmpty() const;
+	idx_t CountSetBits() const;
 };
 
-// A single cache entry: the bitvectors for one (table, predicate) combination
+// A single cache entry: the bitvectors for one (table, predicate) combination.
+// table_oid is used for lookup within a session.
 struct ConditionCacheEntry {
-	string table_name;
+	idx_t table_oid;
 	string filter_key;
 	unordered_map<idx_t, RowGroupBitvector> bitvectors; // rg_idx -> bitvector
 	idx_t total_qualifying_rows = 0;
 };
 
-// Thread-local state for capturing filter key during query_condition_cache_build
-struct BuildCaptureState {
-	bool active = false;
-	string target_table;
-	string captured_filter_key;
-};
-
-// TODO: Replace thread_local variables with ClientContextState to avoid non-trivial thread_local types.
-
-// Global thread-local build capture state
-extern thread_local BuildCaptureState tl_build_capture;
-
-// Pre-optimize match: table_index -> cache entry to inject in the post-optimize pass.
-// Populated by PreOptimizeFunction, consumed and cleared by OptimizeFunction.
-extern thread_local unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> tl_lookup_pending;
-
-// Stored in DuckDB's per-database ObjectCache, non-evictable
+// Stored in DuckDB's per-database ObjectCache
 class ConditionCacheStore : public ObjectCacheEntry {
 public:
 	static constexpr const char *CACHE_KEY = "query_condition_cache_store";
@@ -86,16 +51,16 @@ public:
 	// Lookup by filter key
 	shared_ptr<ConditionCacheEntry> Lookup(const string &filter_key);
 
-	// Lookup all entries for a table
-	vector<shared_ptr<ConditionCacheEntry>> LookupByTable(const string &table_name);
+	// Lookup all entries for a table by OID
+	vector<shared_ptr<ConditionCacheEntry>> LookupByTable(idx_t table_oid);
 
-	// Insert an entry
+	// Insert or update an entry
 	void Insert(shared_ptr<ConditionCacheEntry> entry);
 
 	// Clear all entries
 	void Clear();
 
-	// Get all entries (for query_condition_cache_info)
+	// Get all entries
 	vector<shared_ptr<ConditionCacheEntry>> GetAll();
 
 	// Get or create the store from a client context
