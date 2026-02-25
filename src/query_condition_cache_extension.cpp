@@ -2,8 +2,6 @@
 
 #include "query_condition_cache_extension.hpp"
 
-#include "duckdb.hpp"
-
 namespace duckdb {
 
 namespace {
