@@ -5,17 +5,15 @@ namespace duckdb {
 // ------- ROW_GROUP_BITVECTOR -------
 
 bool RowGroupBitvector::VectorHasRows(idx_t vector_index) const {
-	D_ASSERT(vector_index < VECTORS_PER_ROW_GROUP);
-	return (words[vector_index / 64] >> (vector_index % 64)) & 1ULL;
+	return (matching_vectors.at(vector_index / 64) >> (vector_index % 64)) & 1ULL;
 }
 
 void RowGroupBitvector::SetVector(idx_t vector_index) {
-	D_ASSERT(vector_index < VECTORS_PER_ROW_GROUP);
-	words[vector_index / 64] |= (1ULL << (vector_index % 64));
+	matching_vectors.at(vector_index / 64) |= (1ULL << (vector_index % 64));
 }
 
 bool RowGroupBitvector::IsEmpty() const {
-	for (auto &w : words) {
+	for (const auto &w : matching_vectors) {
 		if (w != 0) {
 			return false;
 		}
@@ -25,7 +23,7 @@ bool RowGroupBitvector::IsEmpty() const {
 
 idx_t RowGroupBitvector::CountSetBits() const {
 	idx_t count = 0;
-	for (auto &w : words) {
+	for (const auto &w : matching_vectors) {
 		uint64_t v = w;
 		while (v) {
 			v &= v - 1;
@@ -49,25 +47,34 @@ shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(const string &filter
 vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::LookupByTable(idx_t table_oid) {
 	lock_guard<mutex> guard(cache_lock);
 	vector<shared_ptr<ConditionCacheEntry>> result;
-	for (auto &pair : entries) {
-		if (pair.second->table_oid == table_oid) {
-			result.push_back(pair.second);
+	auto it = entries_by_table.find(table_oid);
+	if (it != entries_by_table.end()) {
+		result.reserve(it->second.size());
+		for (const auto &key : it->second) {
+			auto entry_it = entries.find(key);
+			if (entry_it != entries.end()) {
+				result.push_back(entry_it->second);
+			}
 		}
 	}
 	return result;
 }
 
-void ConditionCacheStore::Insert(shared_ptr<ConditionCacheEntry> entry) {
+void ConditionCacheStore::Insert(const string &filter_key, shared_ptr<ConditionCacheEntry> entry) {
 	lock_guard<mutex> guard(cache_lock);
-	auto result = entries.emplace(entry->filter_key, entry);
+	const auto table_oid = entry->table_oid;
+	auto result = entries.emplace(filter_key, entry);
 	if (!result.second) {
 		result.first->second = std::move(entry);
+	} else {
+		entries_by_table[table_oid].push_back(filter_key);
 	}
 }
 
 void ConditionCacheStore::Clear() {
 	lock_guard<mutex> guard(cache_lock);
 	entries.clear();
+	entries_by_table.clear();
 }
 
 vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::GetAll() {
@@ -75,7 +82,7 @@ vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::GetAll() {
 	{
 		lock_guard<mutex> guard(cache_lock);
 		result.reserve(entries.size());
-		for (auto &pair : entries) {
+		for (const auto &pair : entries) {
 			result.push_back(pair.second);
 		}
 	}

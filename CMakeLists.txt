@@ -6,6 +6,13 @@ set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
+
+if(UNIX OR APPLE)
+  set(CMAKE_CXX_FLAGS
+      "${CMAKE_CXX_FLAGS} -Wno-c++17-extensions -Wunused-variable -Wunused-function"
+  )
+endif()
+
 include_directories(src/include)
 
 set(EXTENSION_SOURCES src/query_condition_cache_extension.cpp

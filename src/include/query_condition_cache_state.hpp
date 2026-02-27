@@ -9,16 +9,15 @@ namespace duckdb {
 
 // Derived from DuckDB's compile-time configurable constants
 inline constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
-inline constexpr idx_t BITVECTOR_WORDS = (VECTORS_PER_ROW_GROUP + 63) / 64;
+inline constexpr idx_t BITVECTOR_ARRAY_SIZE = (VECTORS_PER_ROW_GROUP + 63) / 64;
 static_assert(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE == 0,
               "DEFAULT_ROW_GROUP_SIZE must be divisible by STANDARD_VECTOR_SIZE");
 
 // Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row,
-// for 0 <= i < VECTORS_PER_ROW_GROUP. Callers must not pass out-of-range indices;
-// D_ASSERT enforces this in debug builds only.
+// for 0 <= i < VECTORS_PER_ROW_GROUP.
 // Backed by array<uint64_t, N> to support configurable row group / vector sizes.
 struct RowGroupBitvector {
-	array<uint64_t, BITVECTOR_WORDS> words = {};
+	array<uint64_t, BITVECTOR_ARRAY_SIZE> matching_vectors = {};
 
 	bool VectorHasRows(idx_t vector_index) const;
 	void SetVector(idx_t vector_index);
@@ -30,9 +29,7 @@ struct RowGroupBitvector {
 // table_oid is used for lookup within a session.
 struct ConditionCacheEntry {
 	idx_t table_oid;
-	string filter_key;
 	unordered_map<idx_t, RowGroupBitvector> bitvectors; // rg_idx -> bitvector
-	idx_t total_qualifying_rows = 0;
 };
 
 // Stored in DuckDB's per-database ObjectCache
@@ -55,7 +52,7 @@ public:
 	vector<shared_ptr<ConditionCacheEntry>> LookupByTable(idx_t table_oid);
 
 	// Insert or update an entry
-	void Insert(shared_ptr<ConditionCacheEntry> entry);
+	void Insert(const string &filter_key, shared_ptr<ConditionCacheEntry> entry);
 
 	// Clear all entries
 	void Clear();
@@ -68,8 +65,11 @@ public:
 
 private:
 	mutex cache_lock;
+	// TODO: Consider sharding for scalability
 	// filter_key -> entry
 	unordered_map<string, shared_ptr<ConditionCacheEntry>> entries;
+	// table_oid -> filter_keys (for efficient lookup by table)
+	unordered_map<idx_t, vector<string>> entries_by_table;
 };
 
 } // namespace duckdb
