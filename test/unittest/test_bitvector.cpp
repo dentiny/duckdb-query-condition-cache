@@ -3,47 +3,47 @@
 
 using namespace duckdb;
 
-TEST_CASE("RowGroupBitvector - basic operations", "[bitvector]") {
-	RowGroupBitvector bv;
+TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 
-	SECTION("initially empty") {
+	SECTION("default constructor is empty") {
+		RowGroupFilter bv;
 		REQUIRE(bv.IsEmpty());
-		REQUIRE(bv.CountSetBits() == 0);
 		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
 			REQUIRE_FALSE(bv.VectorHasRows(i));
 		}
 	}
 
-	SECTION("set and query single vector") {
-		bv.SetVector(0);
+	SECTION("construct with single vector") {
+		RowGroupFilter bv({0});
 		REQUIRE_FALSE(bv.IsEmpty());
 		REQUIRE(bv.VectorHasRows(0));
 		REQUIRE_FALSE(bv.VectorHasRows(1));
-		REQUIRE(bv.CountSetBits() == 1);
 	}
 
-	SECTION("set multiple vectors") {
-		bv.SetVector(0);
-		bv.SetVector(10);
-		bv.SetVector(59);
-		REQUIRE(bv.CountSetBits() == 3);
+	SECTION("construct with multiple vectors") {
+		RowGroupFilter bv({0, 10, 59});
 		REQUIRE(bv.VectorHasRows(0));
 		REQUIRE(bv.VectorHasRows(10));
 		REQUIRE(bv.VectorHasRows(59));
 		REQUIRE_FALSE(bv.VectorHasRows(1));
 	}
 
-	SECTION("set all vectors") {
+	SECTION("construct with all vectors") {
+		vector<idx_t> all;
+		all.reserve(VECTORS_PER_ROW_GROUP);
 		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
-			bv.SetVector(i);
+			all.push_back(i);
 		}
-		REQUIRE(bv.CountSetBits() == VECTORS_PER_ROW_GROUP);
+		RowGroupFilter bv(all);
 		REQUIRE_FALSE(bv.IsEmpty());
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			REQUIRE(bv.VectorHasRows(i));
+		}
 	}
 
-	SECTION("SetVector is idempotent") {
-		bv.SetVector(5);
-		bv.SetVector(5);
-		REQUIRE(bv.CountSetBits() == 1);
+	SECTION("duplicate indices are handled correctly") {
+		RowGroupFilter bv({5, 5});
+		REQUIRE(bv.VectorHasRows(5));
+		REQUIRE_FALSE(bv.VectorHasRows(6));
 	}
 }

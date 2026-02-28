@@ -2,6 +2,7 @@
 
 #include "duckdb/common/array.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
@@ -16,20 +17,44 @@ static_assert(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE == 0,
 // Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row,
 // for 0 <= i < VECTORS_PER_ROW_GROUP.
 // Backed by array<uint64_t, N> to support configurable row group / vector sizes.
-struct RowGroupBitvector {
+struct RowGroupFilter {
 	array<uint64_t, BITVECTOR_ARRAY_SIZE> matching_vectors = {};
 
+	RowGroupFilter() = default;
+
+	// Construct from vector indices that contain at least one qualifying row.
+	// Each index must be in [0, VECTORS_PER_ROW_GROUP). Duplicates are allowed.
+	explicit RowGroupFilter(const vector<idx_t> &qualifying_vectors);
+
 	bool VectorHasRows(idx_t vector_index) const;
-	void SetVector(idx_t vector_index);
 	bool IsEmpty() const;
-	idx_t CountSetBits() const;
+};
+
+// Composite key for cache lookup: (table_oid, filter_key)
+struct CacheKey {
+	idx_t table_oid;
+	string filter_key;
+
+	bool operator==(const CacheKey &other) const {
+		return table_oid == other.table_oid && filter_key == other.filter_key;
+	}
+};
+
+struct CacheKeyHashFunction {
+	uint64_t operator()(const CacheKey &key) const {
+		return CombineHash(Hash<idx_t>(key.table_oid), Hash(key.filter_key.c_str()));
+	}
+};
+
+struct CacheKeyEquality {
+	bool operator()(const CacheKey &a, const CacheKey &b) const {
+		return a == b;
+	}
 };
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
-// table_oid is used for lookup within a session.
 struct ConditionCacheEntry {
-	idx_t table_oid;
-	unordered_map<idx_t, RowGroupBitvector> bitvectors; // rg_idx -> bitvector
+	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
 };
 
 // Stored in DuckDB's per-database ObjectCache
@@ -45,14 +70,11 @@ public:
 		return ObjectType();
 	}
 
-	// Lookup by filter key
-	shared_ptr<ConditionCacheEntry> Lookup(const string &filter_key);
+	// Lookup by cache key; returns nullptr if not found
+	shared_ptr<ConditionCacheEntry> Lookup(const CacheKey &key);
 
-	// Lookup all entries for a table by OID
-	vector<shared_ptr<ConditionCacheEntry>> LookupByTable(idx_t table_oid);
-
-	// Insert or update an entry
-	void Insert(const string &filter_key, shared_ptr<ConditionCacheEntry> entry);
+	// Upsert an entry
+	void Upsert(const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
 	// Clear all entries
 	void Clear();
@@ -66,10 +88,7 @@ public:
 private:
 	mutex cache_lock;
 	// TODO: Consider sharding for scalability
-	// filter_key -> entry
-	unordered_map<string, shared_ptr<ConditionCacheEntry>> entries;
-	// table_oid -> filter_keys (for efficient lookup by table)
-	unordered_map<idx_t, vector<string>> entries_by_table;
+	unordered_map<CacheKey, shared_ptr<ConditionCacheEntry>, CacheKeyHashFunction, CacheKeyEquality> entries;
 };
 
 } // namespace duckdb
