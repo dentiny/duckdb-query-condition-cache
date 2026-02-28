@@ -2,7 +2,7 @@
 
 #include "query_condition_cache_extension.hpp"
 
-#include "duckdb.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 
 namespace duckdb {
 
