@@ -1,6 +1,8 @@
 #include "catch/catch.hpp"
 #include "query_condition_cache_state.hpp"
 
+#include "duckdb/common/exception.hpp"
+
 using namespace duckdb;
 
 TEST_CASE("ConditionCacheStore - basic operations", "[cache_store]") {
@@ -67,5 +69,9 @@ TEST_CASE("ConditionCacheStore - basic operations", "[cache_store]") {
 
 		auto all = store.GetAll();
 		REQUIRE(all.size() == 2);
+	}
+
+	SECTION("upsert null entry throws") {
+		REQUIRE_THROWS_AS(store.Upsert({1, "col:>5"}, nullptr), InvalidInputException);
 	}
 }

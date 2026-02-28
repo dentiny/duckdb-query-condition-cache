@@ -1,5 +1,7 @@
 #include "query_condition_cache_state.hpp"
 
+#include "duckdb/common/exception.hpp"
+
 namespace duckdb {
 
 // ------- ROW_GROUP_FILTER -------
@@ -35,6 +37,9 @@ shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(const CacheKey &key)
 }
 
 void ConditionCacheStore::Upsert(const CacheKey &key, shared_ptr<ConditionCacheEntry> entry) {
+	if (!entry) {
+		throw InvalidInputException("ConditionCacheStore::Upsert: entry must not be null");
+	}
 	lock_guard<mutex> guard(cache_lock);
 	auto result = entries.emplace(key, entry);
 	if (!result.second) {

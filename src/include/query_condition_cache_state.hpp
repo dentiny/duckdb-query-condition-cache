@@ -46,12 +46,6 @@ struct CacheKeyHashFunction {
 	}
 };
 
-struct CacheKeyEquality {
-	bool operator()(const CacheKey &a, const CacheKey &b) const {
-		return a == b;
-	}
-};
-
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry {
 	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
@@ -88,7 +82,7 @@ public:
 private:
 	mutex cache_lock;
 	// TODO: Consider sharding for scalability
-	unordered_map<CacheKey, shared_ptr<ConditionCacheEntry>, CacheKeyHashFunction, CacheKeyEquality> entries;
+	unordered_map<CacheKey, shared_ptr<ConditionCacheEntry>, CacheKeyHashFunction> entries;
 };
 
 } // namespace duckdb
