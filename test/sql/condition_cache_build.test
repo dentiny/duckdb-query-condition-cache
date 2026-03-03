@@ -1,0 +1,39 @@
+# name: test/sql/condition_cache_build.test
+# description: Test condition_cache_build table function
+# group: [sql]
+
+require query_condition_cache
+
+# Create table with multiple row groups (>122880 rows)
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+# Build cache for simple equality predicate
+query I
+SELECT status FROM condition_cache_build('t', 'val = 42');
+----
+Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
+
+# Build with selective predicate (only hits RG0, 2 vectors)
+query I
+SELECT status FROM condition_cache_build('t', 'id < 3000');
+----
+Cache Built: 3000 qualifying rows, 2/245 vectors, 1/5 row groups
+
+# Build same predicate again (upsert, no error)
+query I
+SELECT status FROM condition_cache_build('t', 'val = 42');
+----
+Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
+
+# Nonexistent table throws error
+statement error
+SELECT * FROM condition_cache_build('nonexistent', 'val = 42');
+----
+Table with name nonexistent does not exist
+
+# Invalid predicate throws error
+statement error
+SELECT * FROM condition_cache_build('t', 'invalid_col = 42');
+----
+not found in FROM clause
