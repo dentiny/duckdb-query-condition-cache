@@ -36,4 +36,16 @@ Table with name nonexistent does not exist
 statement error
 SELECT * FROM condition_cache_build('t', 'invalid_col = 42');
 ----
-not found in FROM clause
+does not contain column invalid_col
+
+# Qualified table name with schema
+query I
+SELECT status FROM condition_cache_build('main.t', 'val = 42');
+----
+Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
+
+# Fully qualified table name (catalog.schema.table)
+query I
+SELECT status FROM condition_cache_build('memory.main.t', 'val = 42');
+----
+Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
