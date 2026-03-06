@@ -35,11 +35,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 			                                               LogicalType {LogicalTypeId::BOOLEAN});
 		}
 
-		idx_t total_qualifying_rows = 0;
-		auto entry = BuildCacheEntry(context, table_entry, *bound_expr, total_qualifying_rows);
+		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(total_qualifying_rows == 5000);
 		REQUIRE(entry->bitvectors.size() == 5); // 5 row groups
 	}
 
@@ -55,11 +53,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 			                                               LogicalType {LogicalTypeId::BOOLEAN});
 		}
 
-		idx_t total_qualifying_rows = 0;
-		auto entry = BuildCacheEntry(context, table_entry, *bound_expr, total_qualifying_rows);
+		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(total_qualifying_rows == 3000);
 		REQUIRE(entry->bitvectors.size() == 1); // only row group 0
 	}
 
@@ -75,11 +71,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 			                                               LogicalType {LogicalTypeId::BOOLEAN});
 		}
 
-		idx_t total_qualifying_rows = 0;
-		auto entry = BuildCacheEntry(context, table_entry, *bound_expr, total_qualifying_rows);
+		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(total_qualifying_rows == 0);
 		REQUIRE(entry->bitvectors.empty());
 	}
 }

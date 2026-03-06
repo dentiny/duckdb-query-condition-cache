@@ -12,19 +12,19 @@ CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
 query I
 SELECT status FROM condition_cache_build('t', 'val = 42');
 ----
-Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
+Cache Built: 245/245 vectors, 5/5 row groups
 
 # Build with selective predicate (only hits RG0, 2 vectors)
 query I
 SELECT status FROM condition_cache_build('t', 'id < 3000');
 ----
-Cache Built: 3000 qualifying rows, 2/245 vectors, 1/5 row groups
+Cache Built: 2/245 vectors, 1/5 row groups
 
 # Build same predicate again (upsert, no error)
 query I
 SELECT status FROM condition_cache_build('t', 'val = 42');
 ----
-Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
+Cache Built: 245/245 vectors, 5/5 row groups
 
 # Non-BOOLEAN predicate throws error
 statement error
@@ -48,13 +48,13 @@ does not contain column invalid_col
 query I
 SELECT status FROM condition_cache_build('main.t', 'val = 42');
 ----
-Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
+Cache Built: 245/245 vectors, 5/5 row groups
 
 # Fully qualified table name (catalog.schema.table)
 query I
 SELECT status FROM condition_cache_build('memory.main.t', 'val = 42');
 ----
-Cache Built: 5000 qualifying rows, 245/245 vectors, 5/5 row groups
+Cache Built: 245/245 vectors, 5/5 row groups
 
 # Invalid schema name
 statement error

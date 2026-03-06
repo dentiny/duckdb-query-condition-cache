@@ -86,7 +86,7 @@ void RemapColumnIndices(Expression &expr, const unordered_map<idx_t, idx_t> &map
 // Scan all rows, evaluate predicate, and build a ConditionCacheEntry.
 // Modifies bound_expr in-place (remaps column indices to scan positions).
 shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTableEntry &table_entry,
-                                                Expression &bound_expr, idx_t &total_qualifying_rows) {
+                                                Expression &bound_expr) {
 	auto &storage = table_entry.GetStorage();
 	auto &columns = table_entry.GetColumns();
 
@@ -120,7 +120,6 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	ExpressionExecutor executor(context, bound_expr);
 
 	unordered_map<idx_t, unordered_set<idx_t>> row_group_vec_indices;
-	total_qualifying_rows = 0;
 
 	while (true) {
 		DataChunk chunk;
@@ -147,7 +146,6 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 			idx_t row_group_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
 			idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
 			row_group_vec_indices[row_group_idx].insert(vector_idx);
-			++total_qualifying_rows;
 		}
 	}
 
@@ -220,9 +218,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 		                                               LogicalType {LogicalTypeId::BOOLEAN});
 	}
 
-	idx_t total_qualifying_rows = 0;
-	auto entry = BuildCacheEntry(context, table_entry, *bound_expr, total_qualifying_rows);
-
+	auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 	auto stats = ComputeCacheEntryStats(*entry, bind_data.total_rows);
 
 	// Store in cache
@@ -234,8 +230,8 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 
 	output.SetCardinality(1);
 	output.data[0].SetValue(
-	    0, StringUtil::Format("Cache Built: %llu qualifying rows, %llu/%llu vectors, %llu/%llu row groups",
-	                          total_qualifying_rows, stats.qualifying_vectors, stats.total_vectors,
+	    0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
+	                          stats.qualifying_vectors, stats.total_vectors,
 	                          stats.qualifying_row_groups, stats.total_row_groups));
 }
 

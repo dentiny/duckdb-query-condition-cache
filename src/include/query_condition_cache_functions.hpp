@@ -14,7 +14,7 @@ class Expression;
 // recording which vectors contain qualifying rows.
 // Modifies bound_expr in-place (remaps column indices to scan positions).
 shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTableEntry &table_entry,
-                                                Expression &bound_expr, idx_t &total_qualifying_rows);
+                                                Expression &bound_expr);
 
 struct CacheEntryStats {
 	idx_t qualifying_vectors;
