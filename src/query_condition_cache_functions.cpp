@@ -99,12 +99,12 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 		scan_columns.emplace_back(StorageIndex(col.Oid()), col.Type());
 		storage_to_scan_idx[col.Oid()] = scan_pos++;
 	}
-	idx_t rowid_col_idx = scan_pos;
+	const idx_t rowid_col_idx = scan_pos;
 	scan_columns.emplace_back(StorageIndex(COLUMN_IDENTIFIER_ROW_ID), LogicalType::ROW_TYPE);
 
 	vector<StorageIndex> column_ids;
 	vector<LogicalType> scan_types;
-	for (auto &[id, type] : scan_columns) {
+	for (const auto &[id, type] : scan_columns) {
 		column_ids.push_back(id);
 		scan_types.push_back(type);
 	}
@@ -160,6 +160,31 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	return entry;
 }
 
+CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t total_rows) {
+	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
+
+	idx_t qualifying_vectors = 0;
+	for (const auto &bitvector_pair : entry.bitvectors) {
+		for (idx_t v = 0; v < vectors_per_row_group; ++v) {
+			if (bitvector_pair.second.VectorHasRows(v)) {
+				++qualifying_vectors;
+			}
+		}
+	}
+
+	idx_t full_row_groups = total_rows / DEFAULT_ROW_GROUP_SIZE;
+	idx_t remaining_rows = total_rows % DEFAULT_ROW_GROUP_SIZE;
+	idx_t total_vectors = full_row_groups * vectors_per_row_group;
+	if (remaining_rows > 0) {
+		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+	}
+
+	idx_t qualifying_row_groups = entry.bitvectors.size();
+	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
+
+	return {qualifying_vectors, total_vectors, qualifying_row_groups, total_row_groups};
+}
+
 void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gstate = data_p.global_state->Cast<ConditionCacheBuildState>();
 	if (gstate.done) {
@@ -198,26 +223,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	idx_t total_qualifying_rows = 0;
 	auto entry = BuildCacheEntry(context, table_entry, *bound_expr, total_qualifying_rows);
 
-	// Compute statistics
-	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
-	idx_t qualifying_row_groups = entry->bitvectors.size();
-	idx_t total_row_groups = (bind_data.total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
-
-	idx_t qualifying_vectors = 0;
-	for (const auto &bitvector_pair : entry->bitvectors) {
-		for (idx_t v = 0; v < vectors_per_row_group; ++v) {
-			if (bitvector_pair.second.VectorHasRows(v)) {
-				++qualifying_vectors;
-			}
-		}
-	}
-
-	idx_t full_row_groups = bind_data.total_rows / DEFAULT_ROW_GROUP_SIZE;
-	idx_t remaining_rows = bind_data.total_rows % DEFAULT_ROW_GROUP_SIZE;
-	idx_t total_vectors = full_row_groups * vectors_per_row_group;
-	if (remaining_rows > 0) {
-		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
-	}
+	auto stats = ComputeCacheEntryStats(*entry, bind_data.total_rows);
 
 	// Store in cache
 	// TODO: Use canonical predicate key (sorted expressions) so that "a AND b" and "b AND a" hit same entry
@@ -229,8 +235,8 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	output.SetCardinality(1);
 	output.data[0].SetValue(
 	    0, StringUtil::Format("Cache Built: %llu qualifying rows, %llu/%llu vectors, %llu/%llu row groups",
-	                          total_qualifying_rows, qualifying_vectors, total_vectors, qualifying_row_groups,
-	                          total_row_groups));
+	                          total_qualifying_rows, stats.qualifying_vectors, stats.total_vectors,
+	                          stats.qualifying_row_groups, stats.total_row_groups));
 }
 
 TableFunction ConditionCacheBuildFunction() {
