@@ -1,5 +1,4 @@
 #include "query_condition_cache_functions.hpp"
-#include "query_condition_cache_state.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -21,6 +20,7 @@
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "query_condition_cache_state.hpp"
 
 namespace duckdb {
 namespace {
@@ -30,7 +30,7 @@ namespace {
 struct ConditionCacheBuildBindData : public TableFunctionData {
 	string catalog;
 	string schema;
-	string table_name;
+	string table;
 	string predicate_sql;
 	idx_t table_oid;
 	idx_t total_rows;
@@ -50,9 +50,9 @@ unique_ptr<FunctionData> ConditionCacheBuildBind(ClientContext &context, TableFu
 	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
 	result->catalog = qname.catalog;
 	result->schema = qname.schema;
-	result->table_name = qname.name;
+	result->table = qname.name;
 
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, result->catalog, result->schema, result->table_name);
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, result->catalog, result->schema, result->table);
 	result->table_oid = table_entry.oid;
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
 
@@ -91,19 +91,23 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	auto &columns = table_entry.GetColumns();
 
 	// Scan all physical columns (needed by the predicate expression) plus rowid
-	vector<StorageIndex> column_ids;
-	vector<LogicalType> scan_types;
+	vector<pair<StorageIndex, LogicalType>> scan_columns;
 	unordered_map<idx_t, idx_t> storage_to_scan_idx;
 
 	idx_t scan_pos = 0;
 	for (auto &col : columns.Physical()) {
-		column_ids.push_back(StorageIndex(col.Oid()));
-		scan_types.push_back(col.Type());
+		scan_columns.emplace_back(StorageIndex(col.Oid()), col.Type());
 		storage_to_scan_idx[col.Oid()] = scan_pos++;
 	}
 	idx_t rowid_col_idx = scan_pos;
-	column_ids.push_back(StorageIndex(COLUMN_IDENTIFIER_ROW_ID));
-	scan_types.push_back(LogicalType::ROW_TYPE);
+	scan_columns.emplace_back(StorageIndex(COLUMN_IDENTIFIER_ROW_ID), LogicalType::ROW_TYPE);
+
+	vector<StorageIndex> column_ids;
+	vector<LogicalType> scan_types;
+	for (auto &[id, type] : scan_columns) {
+		column_ids.push_back(id);
+		scan_types.push_back(type);
+	}
 
 	RemapColumnIndices(bound_expr, storage_to_scan_idx);
 
@@ -113,15 +117,14 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	storage.InitializeScan(context, transaction, scan_state, column_ids);
 
 	// Scan and evaluate predicate
-	DataChunk chunk;
-	chunk.Initialize(Allocator::Get(context), scan_types);
 	ExpressionExecutor executor(context, bound_expr);
 
 	unordered_map<idx_t, unordered_set<idx_t>> row_group_vec_indices;
 	total_qualifying_rows = 0;
 
 	while (true) {
-		chunk.Reset();
+		DataChunk chunk;
+		chunk.Initialize(Allocator::Get(context), scan_types);
 		storage.Scan(transaction, chunk, scan_state);
 		if (chunk.size() == 0) {
 			break;
@@ -167,19 +170,26 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheBuildBindData>();
 
 	auto &table_entry =
-	    Catalog::GetEntry<DuckTableEntry>(context, bind_data.catalog, bind_data.schema, bind_data.table_name);
+	    Catalog::GetEntry<DuckTableEntry>(context, bind_data.catalog, bind_data.schema, bind_data.table);
 
 	// Parse predicate SQL and bind column references to table columns
 	auto parsed_exprs = Parser::ParseExpressionList(bind_data.predicate_sql);
 	if (parsed_exprs.empty()) {
 		throw InvalidInputException("condition_cache_build: failed to parse predicate");
 	}
+	// Reject bare column references (e.g. predicate = 'val')
+	if (parsed_exprs[0]->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+		throw InvalidInputException(
+		    "condition_cache_build: predicate must be a boolean expression, not a column reference");
+	}
+
 	auto binder = Binder::CreateBinder(context);
 	physical_index_set_t bound_columns;
-	CheckBinder check_binder(*binder, context, bind_data.table_name, table_entry.GetColumns(), bound_columns);
+	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
 	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-	// SelectExpression requires BOOLEAN return type
+	// CheckBinder sets target_type = INTEGER, so all expressions get cast to INTEGER.
+	// Re-cast to BOOLEAN for SelectExpression.
 	if (bound_expr->return_type.id() != LogicalTypeId::BOOLEAN) {
 		bound_expr = BoundCastExpression::AddCastToType(context, std::move(bound_expr),
 		                                               LogicalType {LogicalTypeId::BOOLEAN});
@@ -225,7 +235,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 
 TableFunction ConditionCacheBuildFunction() {
 	TableFunction func("condition_cache_build",
-	                   {LogicalType {LogicalTypeId::VARCHAR} /*table_name*/,
+	                   {LogicalType {LogicalTypeId::VARCHAR} /*table*/,
 	                    LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
 	                   ConditionCacheBuildExecute, ConditionCacheBuildBind, ConditionCacheBuildInit);
 	return func;

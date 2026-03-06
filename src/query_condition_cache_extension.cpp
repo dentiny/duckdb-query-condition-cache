@@ -1,9 +1,9 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "query_condition_cache_extension.hpp"
-#include "query_condition_cache_functions.hpp"
 
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "query_condition_cache_functions.hpp"
 
 namespace duckdb {
 
