@@ -30,10 +30,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-		if (bound_expr->return_type.id() != LogicalTypeId::BOOLEAN) {
-			bound_expr = BoundCastExpression::AddCastToType(context, std::move(bound_expr),
-			                                               LogicalType {LogicalTypeId::BOOLEAN});
-		}
+		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
+		bound_expr =
+		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
@@ -48,15 +47,32 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-		if (bound_expr->return_type.id() != LogicalTypeId::BOOLEAN) {
-			bound_expr = BoundCastExpression::AddCastToType(context, std::move(bound_expr),
-			                                               LogicalType {LogicalTypeId::BOOLEAN});
-		}
+		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
+		bound_expr =
+		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
 		REQUIRE(entry->bitvectors.size() == 1); // only row group 0
+	}
+
+	SECTION("odd values pass, even values don't") {
+		auto parsed_exprs = Parser::ParseExpressionList("val % 2 = 1");
+		auto binder = Binder::CreateBinder(context);
+		physical_index_set_t bound_columns;
+		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
+		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
+
+		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
+		bound_expr =
+		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
+
+		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
+
+		REQUIRE(entry != nullptr);
+		// Odd values exist in every row group, so all 5 row groups should be present
+		REQUIRE(entry->bitvectors.size() == 5);
 	}
 
 	SECTION("no matching rows") {
@@ -66,10 +82,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-		if (bound_expr->return_type.id() != LogicalTypeId::BOOLEAN) {
-			bound_expr = BoundCastExpression::AddCastToType(context, std::move(bound_expr),
-			                                               LogicalType {LogicalTypeId::BOOLEAN});
-		}
+		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
+		bound_expr =
+		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 

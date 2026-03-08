@@ -23,7 +23,7 @@ struct CacheEntryStats {
 	idx_t total_row_groups;
 };
 
-// TODO: Exposed for future reuse. 
+// TODO: Exposed for future reuse.
 CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t total_rows);
 
 TableFunction ConditionCacheBuildFunction();

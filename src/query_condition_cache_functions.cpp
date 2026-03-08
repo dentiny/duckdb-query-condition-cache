@@ -33,7 +33,7 @@ struct ConditionCacheBuildBindData : public TableFunctionData {
 	string table;
 	string predicate_sql;
 	idx_t table_oid;
-	idx_t total_rows;
+	idx_t total_rows; // total number of rows in the table
 };
 
 struct ConditionCacheBuildState : public GlobalTableFunctionState {
@@ -48,9 +48,9 @@ unique_ptr<FunctionData> ConditionCacheBuildBind(ClientContext &context, TableFu
 	// Parse qualified table name (supports "table", "schema.table", "catalog.schema.table")
 	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
 	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
-	result->catalog = qname.catalog;
-	result->schema = qname.schema;
-	result->table = qname.name;
+	result->catalog = std::move(qname.catalog);
+	result->schema = std::move(qname.schema);
+	result->table = std::move(qname.name);
 
 	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, result->catalog, result->schema, result->table);
 	result->table_oid = table_entry.oid;
@@ -66,20 +66,32 @@ unique_ptr<GlobalTableFunctionState> ConditionCacheBuildInit(ClientContext &cont
 	return make_uniq<ConditionCacheBuildState>();
 }
 
+// Collect all column OIDs referenced by bound expressions (BoundReferenceExpression).
+void CollectReferencedColumns(Expression &expr, unordered_set<column_t> &column_oids) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		auto &ref = expr.Cast<BoundReferenceExpression>();
+		column_oids.insert(ref.index);
+	}
+	ExpressionIterator::EnumerateChildren(expr,
+	                                      [&](Expression &child) { CollectReferencedColumns(child, column_oids); });
+}
+
 // After binding, column indices refer to StorageOid which may not match the scan order.
 // Remap them to the actual DataChunk column positions.
-void RemapColumnIndices(Expression &expr, const unordered_map<idx_t, idx_t> &mapping) {
+void RemapColumnIndices(Expression &expr, const unordered_map<column_t, idx_t> &mapping) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 		auto &ref = expr.Cast<BoundReferenceExpression>();
 		auto it = mapping.find(ref.index);
-		if (it != mapping.end()) {
-			ref.index = it->second;
-		}
+		D_ASSERT(it != mapping.end());
+		ref.index = it->second;
 	}
-	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) {
-		RemapColumnIndices(child, mapping);
-	});
+	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { RemapColumnIndices(child, mapping); });
 }
+
+struct ScanColumn {
+	StorageIndex index;
+	LogicalType type;
+};
 
 } // namespace
 
@@ -90,23 +102,34 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	auto &storage = table_entry.GetStorage();
 	auto &columns = table_entry.GetColumns();
 
-	// Scan all physical columns (needed by the predicate expression) plus rowid
-	vector<pair<StorageIndex, LogicalType>> scan_columns;
-	unordered_map<idx_t, idx_t> storage_to_scan_idx;
+	// Only scan columns referenced by the predicate, plus rowid
+	unordered_set<column_t> referenced_oids;
+	CollectReferencedColumns(bound_expr, referenced_oids);
+
+	vector<ScanColumn> scan_columns;
+	// Maps storage column OID to scan position in DataChunk
+	unordered_map<column_t, idx_t> storage_to_scan_idx;
+
+	scan_columns.reserve(referenced_oids.size() + 1);
 
 	idx_t scan_pos = 0;
-	for (auto &col : columns.Physical()) {
-		scan_columns.emplace_back(StorageIndex(col.Oid()), col.Type());
+	for (const auto &col : columns.Physical()) {
+		if (referenced_oids.count(col.Oid()) == 0) {
+			continue;
+		}
+		scan_columns.push_back({StorageIndex(col.Oid()), col.Type()});
 		storage_to_scan_idx[col.Oid()] = scan_pos++;
 	}
 	const idx_t rowid_col_idx = scan_pos;
-	scan_columns.emplace_back(StorageIndex(COLUMN_IDENTIFIER_ROW_ID), LogicalType::ROW_TYPE);
+	scan_columns.push_back({StorageIndex(COLUMN_IDENTIFIER_ROW_ID), LogicalType {LogicalType::ROW_TYPE}});
 
 	vector<StorageIndex> column_ids;
 	vector<LogicalType> scan_types;
-	for (const auto &[id, type] : scan_columns) {
-		column_ids.push_back(id);
-		scan_types.push_back(type);
+	column_ids.reserve(scan_columns.size());
+	scan_types.reserve(scan_columns.size());
+	for (const auto &sc : scan_columns) {
+		column_ids.push_back(sc.index);
+		scan_types.push_back(sc.type);
 	}
 
 	RemapColumnIndices(bound_expr, storage_to_scan_idx);
@@ -119,7 +142,7 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	// Scan and evaluate predicate
 	ExpressionExecutor executor(context, bound_expr);
 
-	unordered_map<idx_t, unordered_set<idx_t>> row_group_vec_indices;
+	auto entry = make_shared_ptr<ConditionCacheEntry>();
 
 	while (true) {
 		DataChunk chunk;
@@ -137,24 +160,18 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 		rowid_vec.ToUnifiedFormat(chunk.size(), rowid_data);
 		auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
 
-		for (idx_t i = 0; i < match_count; ++i) {
-			auto rid_idx = rowid_data.sel->get_index(sel.get_index(i));
-			if (!rowid_data.validity.RowIsValid(rid_idx)) {
+		for (idx_t idx = 0; idx < match_count; ++idx) {
+			auto rowid_entry = rowid_data.sel->get_index(sel.get_index(idx));
+			if (!rowid_data.validity.RowIsValid(rowid_entry)) {
 				continue;
 			}
-			auto row_id = NumericCast<idx_t>(rowids[rid_idx]);
+			auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
 			idx_t row_group_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
 			idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-			row_group_vec_indices[row_group_idx].insert(vector_idx);
+			entry->bitvectors[row_group_idx].SetVector(vector_idx);
 		}
 	}
 
-	// Build cache entry from collected indices
-	auto entry = make_shared_ptr<ConditionCacheEntry>();
-	for (const auto &pair : row_group_vec_indices) {
-		vector<idx_t> indices(pair.second.begin(), pair.second.end());
-		entry->bitvectors.emplace(pair.first, RowGroupFilter(indices));
-	}
 	return entry;
 }
 
@@ -180,7 +197,12 @@ CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t t
 	idx_t qualifying_row_groups = entry.bitvectors.size();
 	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
 
-	return {qualifying_vectors, total_vectors, qualifying_row_groups, total_row_groups};
+	CacheEntryStats stats;
+	stats.qualifying_vectors = qualifying_vectors;
+	stats.total_vectors = total_vectors;
+	stats.qualifying_row_groups = qualifying_row_groups;
+	stats.total_row_groups = total_row_groups;
+	return stats;
 }
 
 void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -211,12 +233,9 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
 	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-	// CheckBinder sets target_type = INTEGER, so all expressions get cast to INTEGER.
-	// Re-cast to BOOLEAN for SelectExpression.
-	if (bound_expr->return_type.id() != LogicalTypeId::BOOLEAN) {
-		bound_expr = BoundCastExpression::AddCastToType(context, std::move(bound_expr),
-		                                               LogicalType {LogicalTypeId::BOOLEAN});
-	}
+	// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN for SelectExpression.
+	bound_expr =
+	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 	auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 	auto stats = ComputeCacheEntryStats(*entry, bind_data.total_rows);
@@ -229,17 +248,16 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	store->Upsert(key, std::move(entry));
 
 	output.SetCardinality(1);
-	output.data[0].SetValue(
-	    0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
-	                          stats.qualifying_vectors, stats.total_vectors,
-	                          stats.qualifying_row_groups, stats.total_row_groups));
+	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
+	                                              stats.qualifying_vectors, stats.total_vectors,
+	                                              stats.qualifying_row_groups, stats.total_row_groups));
 }
 
 TableFunction ConditionCacheBuildFunction() {
-	TableFunction func("condition_cache_build",
-	                   {LogicalType {LogicalTypeId::VARCHAR} /*table*/,
-	                    LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
-	                   ConditionCacheBuildExecute, ConditionCacheBuildBind, ConditionCacheBuildInit);
+	TableFunction func(
+	    "condition_cache_build",
+	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
+	    ConditionCacheBuildExecute, ConditionCacheBuildBind, ConditionCacheBuildInit);
 	return func;
 }
 

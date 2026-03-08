@@ -12,6 +12,10 @@ RowGroupFilter::RowGroupFilter(const vector<idx_t> &qualifying_vectors) {
 	}
 }
 
+void RowGroupFilter::SetVector(idx_t vector_index) {
+	matching_vectors.at(vector_index / 64) |= (1ULL << (vector_index % 64));
+}
+
 bool RowGroupFilter::VectorHasRows(idx_t vector_index) const {
 	return (matching_vectors.at(vector_index / 64) >> (vector_index % 64)) & 1ULL;
 }

@@ -26,6 +26,7 @@ struct RowGroupFilter {
 	// Each index must be in [0, VECTORS_PER_ROW_GROUP). Duplicates are allowed.
 	explicit RowGroupFilter(const vector<idx_t> &qualifying_vectors);
 
+	void SetVector(idx_t vector_index);
 	bool VectorHasRows(idx_t vector_index) const;
 	bool IsEmpty() const;
 };
