@@ -3,12 +3,13 @@
 #include "query_condition_cache_extension.hpp"
 
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "query_condition_cache_functions.hpp"
 
 namespace duckdb {
 
 namespace {
 void LoadInternal(ExtensionLoader &loader) {
-	// Functions and optimizer will be registered in subsequent PRs.
+	loader.RegisterFunction(ConditionCacheBuildFunction());
 }
 } // namespace
 
