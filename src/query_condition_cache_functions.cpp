@@ -197,12 +197,12 @@ CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t t
 	idx_t qualifying_row_groups = entry.bitvectors.size();
 	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
 
-	CacheEntryStats stats;
-	stats.qualifying_vectors = qualifying_vectors;
-	stats.total_vectors = total_vectors;
-	stats.qualifying_row_groups = qualifying_row_groups;
-	stats.total_row_groups = total_row_groups;
-	return stats;
+	return CacheEntryStats {
+	    .qualifying_vectors = qualifying_vectors,
+	    .total_vectors = total_vectors,
+	    .qualifying_row_groups = qualifying_row_groups,
+	    .total_row_groups = total_row_groups,
+	};
 }
 
 void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
