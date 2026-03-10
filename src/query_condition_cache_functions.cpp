@@ -222,12 +222,6 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	if (parsed_exprs.empty()) {
 		throw InvalidInputException("condition_cache_build: failed to parse predicate");
 	}
-	// Reject bare column references (e.g. predicate = 'val')
-	if (parsed_exprs[0]->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
-		throw InvalidInputException(
-		    "condition_cache_build: predicate must be a boolean expression, not a column reference");
-	}
-
 	auto binder = Binder::CreateBinder(context);
 	physical_index_set_t bound_columns;
 	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
