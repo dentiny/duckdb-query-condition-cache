@@ -57,7 +57,9 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	idx_t rg_idx = NumericCast<idx_t>(first_row_id) / DEFAULT_ROW_GROUP_SIZE;
 	idx_t vec_idx = (NumericCast<idx_t>(first_row_id) % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
 
-	bool passes = false;
+	// Default to true: if row group is not in cache (e.g. newly inserted),
+	// let it pass through to upper filter evaluation for correctness.
+	bool passes = true;
 	auto it = entry.bitvectors.find(rg_idx);
 	if (it != entry.bitvectors.end()) {
 		passes = it->second.VectorHasRows(vec_idx);
@@ -84,10 +86,10 @@ FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &sta
 	idx_t min_rg = NumericCast<idx_t>(min_val) / DEFAULT_ROW_GROUP_SIZE;
 	idx_t max_rg = NumericCast<idx_t>(max_val) / DEFAULT_ROW_GROUP_SIZE;
 
-	// If any row group in the range has matching vectors, we can't prune
+	// If any row group is not in cache (e.g. newly inserted) or has matching vectors, we can't prune
 	for (idx_t rg = min_rg; rg <= max_rg; ++rg) {
 		auto it = cache_entry->bitvectors.find(rg);
-		if (it != cache_entry->bitvectors.end() && !it->second.IsEmpty()) {
+		if (it == cache_entry->bitvectors.end() || !it->second.IsEmpty()) {
 			return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 		}
 	}
