@@ -8,22 +8,22 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 test_release_all:
-	@echo "Running tests from test/sql..."
-	./build/release/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
 	@echo "Running tests from duckdb/test..."
-	./build/release/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+	DUCKDB_TEST_CONFIG=$(PROJ_DIR)test/configs/enable_query_condition_cache.json ./build/release/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+	@echo "Running tests from test/sql..."
+	DUCKDB_TEST_CONFIG=$(PROJ_DIR)test/configs/enable_query_condition_cache.json ./build/release/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
 
 test_debug_all:
-	@echo "Running tests from test/sql..."
-	./build/debug/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
 	@echo "Running tests from duckdb/test..."
-	./build/debug/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+	DUCKDB_TEST_CONFIG=$(PROJ_DIR)test/configs/enable_query_condition_cache.json ./build/debug/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+	@echo "Running tests from test/sql..."
+	DUCKDB_TEST_CONFIG=$(PROJ_DIR)test/configs/enable_query_condition_cache.json ./build/debug/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
 
 test_reldebug_all:
-	@echo "Running tests from test/sql..."
-	./build/reldebug/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
 	@echo "Running tests from duckdb/test..."
-	./build/reldebug/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+	DUCKDB_TEST_CONFIG=$(PROJ_DIR)test/configs/enable_query_condition_cache.json ./build/reldebug/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+	@echo "Running tests from test/sql..."
+	DUCKDB_TEST_CONFIG=$(PROJ_DIR)test/configs/enable_query_condition_cache.json ./build/reldebug/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
 
 format-all: format
 	find test/unittest -iname *.hpp -o -iname *.cpp | xargs clang-format --sort-includes=0 -style=file -i
