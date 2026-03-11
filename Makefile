@@ -7,6 +7,18 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
+test_release_all:
+	@echo "Running tests from test/sql..."
+	./build/release/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
+	@echo "Running tests from duckdb/test..."
+	./build/release/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+
+test_debug_all:
+	@echo "Running tests from test/sql..."
+	./build/debug/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
+	@echo "Running tests from duckdb/test..."
+	./build/debug/$(TEST_PATH) --test-dir $(PROJ_DIR)duckdb "test/*"
+
 test_reldebug_all:
 	@echo "Running tests from test/sql..."
 	./build/reldebug/$(TEST_PATH) --test-dir $(PROJ_DIR) "$(TESTS_BASE_DIRECTORY)*"
@@ -18,4 +30,4 @@ format-all: format
 	cmake-format -i CMakeLists.txt
 	cmake-format -i test/unittest/CMakeLists.txt
 
-PHONY: format-all test_reldebug_all
+PHONY: format-all test_release_all test_debug_all test_reldebug_all
