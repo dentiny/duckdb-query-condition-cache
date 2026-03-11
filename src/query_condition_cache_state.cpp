@@ -68,6 +68,46 @@ vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::GetAll() {
 	return result;
 }
 
+idx_t ConditionCacheStore::RemoveRowGroupsForTable(idx_t table_oid, const unordered_set<idx_t> &row_group_indices) {
+	lock_guard<mutex> guard(cache_lock);
+	idx_t removed_count = 0;
+	vector<CacheKey> keys_to_remove;
+	for (auto &pair : entries) {
+		if (pair.first.table_oid != table_oid) {
+			continue;
+		}
+		auto &entry = pair.second;
+		for (auto rg_idx : row_group_indices) {
+			if (entry->bitvectors.erase(rg_idx) > 0) {
+				++removed_count;
+			}
+		}
+		if (entry->bitvectors.empty()) {
+			keys_to_remove.push_back(pair.first);
+		}
+	}
+	for (auto &key : keys_to_remove) {
+		entries.erase(key);
+	}
+	return removed_count;
+}
+
+idx_t ConditionCacheStore::RemoveByTable(idx_t table_oid) {
+	lock_guard<mutex> guard(cache_lock);
+	idx_t removed_count = 0;
+	vector<CacheKey> keys_to_remove;
+	for (auto &pair : entries) {
+		if (pair.first.table_oid == table_oid) {
+			keys_to_remove.push_back(pair.first);
+		}
+	}
+	for (auto &key : keys_to_remove) {
+		entries.erase(key);
+		++removed_count;
+	}
+	return removed_count;
+}
+
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	return cache.GetOrCreate<ConditionCacheStore>(CACHE_KEY);

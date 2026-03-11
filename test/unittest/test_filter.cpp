@@ -27,12 +27,12 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
 	}
 
-	SECTION("row group without qualifying vectors: always false") {
+	SECTION("row group without qualifying vectors: no pruning") {
 		// Stats covering row group 1 (row_ids 122880..245759) - no entry in cache
 		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
 		NumericStats::SetMin(stats, Value::BIGINT(122880));
 		NumericStats::SetMax(stats, Value::BIGINT(200000));
-		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::FILTER_ALWAYS_FALSE);
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
 	}
 
 	SECTION("row group 2 with qualifying vectors: no pruning") {

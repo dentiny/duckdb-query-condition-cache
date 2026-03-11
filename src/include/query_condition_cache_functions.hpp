@@ -27,5 +27,6 @@ struct CacheEntryStats {
 CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t total_rows);
 
 TableFunction ConditionCacheBuildFunction();
+TableFunction ConditionCacheInfoFunction();
 
 } // namespace duckdb
