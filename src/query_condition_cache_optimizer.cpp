@@ -175,7 +175,7 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> 
 		return;
 	}
 
-	InjectCacheFilter(plan, std::move(it->second));
+	InjectCacheFilter(plan, it->second);
 	tl_cache_apply_pending.erase(it);
 }
 
@@ -184,7 +184,7 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> 
 // ============================================================================
 
 void QueryConditionCacheOptimizer::InjectCacheFilter(unique_ptr<LogicalOperator> &get_plan,
-                                                     shared_ptr<ConditionCacheEntry> entry) {
+                                                     const shared_ptr<ConditionCacheEntry> &entry) {
 	auto &get = get_plan->Cast<LogicalGet>();
 
 	ScalarFunction func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},

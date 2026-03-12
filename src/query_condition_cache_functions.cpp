@@ -57,7 +57,7 @@ unique_ptr<FunctionData> ConditionCacheBuildBind(ClientContext &context, TableFu
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
 
 	names.emplace_back("status");
-	return_types.emplace_back(LogicalType {LogicalTypeId::VARCHAR});
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	return result;
 }
