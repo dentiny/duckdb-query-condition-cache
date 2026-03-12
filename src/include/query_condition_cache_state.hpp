@@ -64,6 +64,30 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	optional_idx GetEstimatedCacheMemory() const override;
 };
 
+// Per-table index stored in ObjectCache (non-evictable). Holds the set of
+// filter_keys for which ConditionCacheEntry objects exist, enabling
+// invalidation lookups by table_oid.
+struct TableFilterKeyIndex : public ObjectCacheEntry {
+	mutex lock;
+	vector<string> filter_keys;
+
+	static string ObjectType() {
+		return "qcc_filter_key_index";
+	}
+
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	void Add(const string &filter_key);
+	void Remove(const string &filter_key);
+	vector<string> GetAll();
+};
+
 // Stored in DuckDB's per-database ObjectCache
 class ConditionCacheStore : public ObjectCacheEntry {
 public:
@@ -95,8 +119,8 @@ public:
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:
-	// Generate a unique cache key string from CacheKey
 	static string MakeCacheKeyString(const CacheKey &key);
+	static string MakeFilterKeyIndexKey(idx_t table_oid);
 };
 
 } // namespace duckdb
