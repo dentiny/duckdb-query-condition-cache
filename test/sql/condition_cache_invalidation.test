@@ -107,3 +107,54 @@ query I
 SELECT * FROM condition_cache_info('t2', 'val = 5');
 ----
 0
+
+# ============================================================================
+# TRUNCATE should not crash and stale entries should be harmless
+# ============================================================================
+
+statement ok
+CREATE TABLE t_trunc AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+query I
+SELECT status FROM condition_cache_build('t_trunc', 'val = 42');
+----
+Cache Built: 245/245 vectors, 5/5 row groups
+
+query I
+SELECT * FROM condition_cache_info('t_trunc', 'val = 42');
+----
+5
+
+statement ok
+TRUNCATE t_trunc;
+
+# After truncate, cache entry may still exist but queries must still be correct
+# (empty table returns 0 rows regardless of stale cache)
+query I
+SELECT count(*) FROM t_trunc WHERE val = 42;
+----
+0
+
+# ============================================================================
+# DROP TABLE should not crash with active cache entries
+# ============================================================================
+
+statement ok
+CREATE TABLE t_drop AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+query I
+SELECT status FROM condition_cache_build('t_drop', 'val = 42');
+----
+Cache Built: 245/245 vectors, 5/5 row groups
+
+statement ok
+DROP TABLE t_drop;
+
+# Recreate table — different OID, stale entries from old OID are orphaned but harmless
+statement ok
+CREATE TABLE t_drop AS SELECT i AS id, i % 10 AS val FROM range(1000) t(i);
+
+query I
+SELECT count(*) FROM t_drop WHERE val = 5;
+----
+100

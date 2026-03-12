@@ -1,40 +1,13 @@
 #include "catch/catch.hpp"
+#include "physical_cache_invalidator.hpp"
 #include "query_condition_cache_extension.hpp"
-#include "query_condition_cache_state.hpp"
+#include "test_helpers_invalidation.hpp"
 
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
-#include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/prepared_statement.hpp"
+#include "duckdb/main/prepared_statement_data.hpp"
 
 namespace duckdb {
-
-// Helper: build cache for (table_name, predicate) via the SQL table function.
-static void BuildCache(Connection &con, const string &table_name, const string &predicate) {
-	auto result = con.Query("SELECT * FROM condition_cache_build('" + table_name + "', '" + predicate + "')");
-	REQUIRE(result->GetError() == "");
-}
-
-// Helper: get the cache store from a connection's context.
-static shared_ptr<ConditionCacheStore> GetStore(Connection &con) {
-	return ConditionCacheStore::GetOrCreate(*con.context);
-}
-
-// Helper: look up a cache entry by table OID and predicate.
-static shared_ptr<ConditionCacheEntry> LookupEntry(Connection &con, idx_t table_oid, const string &predicate) {
-	auto store = GetStore(con);
-	return store->Lookup(*con.context, {table_oid, predicate});
-}
-
-// Helper: get the OID of a table via the catalog API.
-static idx_t GetTableOid(Connection &con, const string &table_name) {
-	con.BeginTransaction();
-	auto &context = *con.context;
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA, table_name);
-	auto oid = table_entry.oid;
-	con.Commit();
-	return oid;
-}
 
 TEST_CASE("Optimizer invalidation - DELETE removes affected row groups from cache", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
@@ -250,6 +223,245 @@ TEST_CASE("Optimizer invalidation - DELETE across multiple row groups", "[invali
 	REQUIRE(after->bitvectors.count(2) == 0);
 	REQUIRE(after->bitvectors.count(3) == 1);
 	REQUIRE(after->bitvectors.count(4) == 1);
+}
+
+TEST_CASE("Optimizer invalidation - MERGE invalidates matched and inserted row groups", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	// Create target table spanning multiple row groups
+	con.Query("CREATE TABLE dst AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i)");
+	auto table_oid = GetTableOid(con, "dst");
+
+	BuildCache(con, "dst", "val = 42");
+	auto entry = LookupEntry(con, table_oid, "val = 42");
+	REQUIRE(entry != nullptr);
+	REQUIRE(entry->bitvectors.size() == 5);
+
+	// Create source table with:
+	// - id=200 matches an existing row in RG0 (update path)
+	// - id=600000 does not exist (insert path, appended after last RG)
+	con.Query("CREATE TABLE src (id INTEGER, val INTEGER)");
+	con.Query("INSERT INTO src VALUES (200, 999), (600000, 42)");
+
+	auto merge_result = con.Query("MERGE INTO dst USING src ON dst.id = src.id "
+	                              "WHEN MATCHED THEN UPDATE SET val = src.val "
+	                              "WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.val)");
+	REQUIRE_FALSE(merge_result->HasError());
+
+	// RG0 should be invalidated (matched update of id=200)
+	// Last RG (RG4) should be invalidated (insert of id=600000 appended there)
+	auto after = LookupEntry(con, table_oid, "val = 42");
+	REQUIRE(after != nullptr);
+	// RG0 and RG4 invalidated, RGs 1-3 remain
+	REQUIRE(after->bitvectors.count(0) == 0);
+	REQUIRE(after->bitvectors.count(1) == 1);
+	REQUIRE(after->bitvectors.count(2) == 1);
+	REQUIRE(after->bitvectors.count(3) == 1);
+	REQUIRE(after->bitvectors.count(4) == 0);
+}
+
+TEST_CASE("Optimizer invalidation - TRUNCATE does not crash with stale cache", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i)");
+	auto table_oid = GetTableOid(con, "t");
+
+	BuildCache(con, "t", "val = 42");
+	auto entry = LookupEntry(con, table_oid, "val = 42");
+	REQUIRE(entry != nullptr);
+	REQUIRE(entry->bitvectors.size() == 5);
+
+	// TRUNCATE removes all rows — stale cache entries remain but are harmless
+	auto trunc_result = con.Query("TRUNCATE t");
+	REQUIRE_FALSE(trunc_result->HasError());
+
+	// Query on empty table should return 0 rows regardless of stale cache
+	auto count_result = con.Query("SELECT count(*) FROM t WHERE val = 42");
+	REQUIRE_FALSE(count_result->HasError());
+	auto chunk = count_result->Fetch();
+	REQUIRE(chunk->GetValue(0, 0).GetValue<int64_t>() == 0);
+}
+
+TEST_CASE("Optimizer invalidation - DROP TABLE does not crash with stale cache", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i)");
+	auto table_oid = GetTableOid(con, "t");
+
+	BuildCache(con, "t", "val = 42");
+	auto entry = LookupEntry(con, table_oid, "val = 42");
+	REQUIRE(entry != nullptr);
+
+	// DROP TABLE — stale cache entries become orphaned
+	auto drop_result = con.Query("DROP TABLE t");
+	REQUIRE_FALSE(drop_result->HasError());
+
+	// Recreate table (gets new OID) and query — must work correctly
+	con.Query("CREATE TABLE t AS SELECT i AS id, i % 10 AS val FROM range(1000) t(i)");
+
+	auto count_result = con.Query("SELECT count(*) FROM t WHERE val = 5");
+	REQUIRE_FALSE(count_result->HasError());
+	auto chunk = count_result->Fetch();
+	REQUIRE(chunk->GetValue(0, 0).GetValue<int64_t>() == 100);
+}
+
+TEST_CASE("Optimizer invalidation - INSERT into partial tail row group", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	// 130000 rows = 1 full RG (122880) + partial RG with 7120 rows
+	con.Query("CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(130000) t(i)");
+	auto table_oid = GetTableOid(con, "t");
+
+	BuildCache(con, "t", "val = 42");
+	auto entry = LookupEntry(con, table_oid, "val = 42");
+	REQUIRE(entry != nullptr);
+	REQUIRE(entry->bitvectors.size() == 2); // RG0 (full) + RG1 (partial)
+
+	// INSERT a single row — goes into the partial tail RG (RG1)
+	auto ins_result = con.Query("INSERT INTO t VALUES (999999, 42)");
+	REQUIRE_FALSE(ins_result->HasError());
+
+	// RG1 (partial tail) should be invalidated, RG0 preserved
+	auto after = LookupEntry(con, table_oid, "val = 42");
+	REQUIRE(after != nullptr);
+	REQUIRE(after->bitvectors.size() == 1);
+	REQUIRE(after->bitvectors.count(0) == 1);
+	REQUIRE(after->bitvectors.count(1) == 0);
+
+	// Query must still return correct results including the new row
+	auto count_result = con.Query("SELECT count(*) FROM t WHERE val = 42");
+	REQUIRE_FALSE(count_result->HasError());
+	auto chunk = count_result->Fetch();
+	// 130000 / 100 = 1300 rows with val=42, plus 1 inserted
+	REQUIRE(chunk->GetValue(0, 0).GetValue<int64_t>() == 1301);
+}
+
+// --- Plan injection tests (verify optimizer injects PhysicalCacheInvalidator with correct fields) ---
+
+TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for DELETE", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE t AS SELECT i AS id FROM range(100) t(i)");
+	auto table_oid = GetTableOid(con, "t");
+
+	auto prepared = con.Prepare("DELETE FROM t WHERE id < 10");
+	REQUIRE_FALSE(prepared->HasError());
+	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	REQUIRE(invalidator);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::ROW_ID);
+	REQUIRE(invalidator->table_oid == table_oid);
+}
+
+TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for UPDATE", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE t AS SELECT i AS id, i AS val FROM range(100) t(i)");
+	auto table_oid = GetTableOid(con, "t");
+
+	auto prepared = con.Prepare("UPDATE t SET val = 999 WHERE id = 5");
+	REQUIRE_FALSE(prepared->HasError());
+	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	REQUIRE(invalidator);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::ROW_ID);
+	REQUIRE(invalidator->table_oid == table_oid);
+}
+
+TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE t (id INTEGER, val INTEGER)");
+	auto table_oid = GetTableOid(con, "t");
+
+	auto prepared = con.Prepare("INSERT INTO t VALUES (1, 2)");
+	REQUIRE_FALSE(prepared->HasError());
+	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	REQUIRE(invalidator);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::INSERT);
+	REQUIRE(invalidator->table_oid == table_oid);
+	REQUIRE(invalidator->pre_insert_row_count == 0);
+}
+
+TEST_CASE("Optimizer invalidation - no invalidator for SELECT", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE t AS SELECT i AS id FROM range(100) t(i)");
+
+	auto prepared = con.Prepare("SELECT * FROM t WHERE id < 10");
+	REQUIRE_FALSE(prepared->HasError());
+	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	REQUIRE_FALSE(invalidator);
+}
+
+TEST_CASE("Optimizer invalidation - injects MERGE invalidator for INSERT ON CONFLICT", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE t (id INTEGER PRIMARY KEY, val INTEGER)");
+	con.Query("INSERT INTO t VALUES (1, 10)");
+	auto table_oid = GetTableOid(con, "t");
+
+	auto prepared = con.Prepare("INSERT INTO t VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET val = 20");
+	REQUIRE_FALSE(prepared->HasError());
+	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	REQUIRE(invalidator);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::MERGE);
+	REQUIRE(invalidator->table_oid == table_oid);
+	REQUIRE(invalidator->pre_insert_row_count == 1);
+}
+
+TEST_CASE("Optimizer invalidation - injects MERGE invalidator for MERGE", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE dst AS SELECT i AS id, i AS val FROM range(100) t(i)");
+	con.Query("CREATE TABLE src AS SELECT i AS id, i * 10 AS val FROM range(50, 150) t(i)");
+	auto table_oid = GetTableOid(con, "dst");
+
+	auto prepared = con.Prepare("MERGE INTO dst USING src ON dst.id = src.id "
+	                            "WHEN MATCHED THEN UPDATE SET val = src.val "
+	                            "WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.val)");
+	REQUIRE_FALSE(prepared->HasError());
+	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	REQUIRE(invalidator);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::MERGE);
+	REQUIRE(invalidator->table_oid == table_oid);
+	REQUIRE(invalidator->pre_insert_row_count == 100);
+}
+
+TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT SELECT", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE src AS SELECT i AS id FROM range(100) t(i)");
+	con.Query("CREATE TABLE dst (id INTEGER)");
+	auto table_oid = GetTableOid(con, "dst");
+
+	auto prepared = con.Prepare("INSERT INTO dst SELECT * FROM src WHERE id < 50");
+	REQUIRE_FALSE(prepared->HasError());
+	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	REQUIRE(invalidator);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::INSERT);
+	REQUIRE(invalidator->table_oid == table_oid);
+	REQUIRE(invalidator->pre_insert_row_count == 0);
 }
 
 TEST_CASE("Optimizer invalidation - DML on empty cache is no-op", "[invalidation][optimizer]") {
