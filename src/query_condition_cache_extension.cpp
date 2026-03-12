@@ -4,6 +4,7 @@
 
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 #include "query_condition_cache_functions.hpp"
 #include "query_condition_cache_optimizer.hpp"
 
@@ -14,7 +15,8 @@ namespace {
 // This callback throws an exception to confirm it's being called
 void EnableQueryConditionCacheCallback(ClientContext &context, SetScope scope, Value &parameter) {
 	// Throw an error to verify this callback is being called
-	throw InvalidInputException("enable_query_condition_cache callback was called! Setting value: %s", parameter.ToString());
+	throw InvalidInputException("enable_query_condition_cache callback was called! Setting value: %s",
+	                            parameter.ToString());
 }
 
 void LoadInternal(ExtensionLoader &loader) {
@@ -28,8 +30,8 @@ void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType {LogicalTypeId::BOOLEAN}, Value::BOOLEAN(false));
 
 	// Register optimizer extensions
-	config.optimizer_extensions.push_back(QueryConditionCacheOptimizer());
-	config.optimizer_extensions.push_back(CacheInvalidationOptimizer());
+	OptimizerExtension::Register(config, QueryConditionCacheOptimizer());
+	OptimizerExtension::Register(config, CacheInvalidationOptimizer());
 }
 } // namespace
 

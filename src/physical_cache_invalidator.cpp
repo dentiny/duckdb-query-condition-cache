@@ -77,7 +77,7 @@ OperatorFinalResultType PhysicalCacheInvalidator::OperatorFinalize(Pipeline &pip
 
 	if (!invalidator_state.affected_row_groups.empty()) {
 		auto store = ConditionCacheStore::GetOrCreate(context);
-		store->RemoveRowGroupsForTable(table_oid, invalidator_state.affected_row_groups);
+		store->RemoveRowGroupsForTable(context, table_oid, invalidator_state.affected_row_groups);
 	}
 	return OperatorFinalResultType::FINISHED;
 }

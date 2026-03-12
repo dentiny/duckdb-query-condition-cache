@@ -82,13 +82,13 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 
 	auto key = ComputePredicateKey(table->oid, filter.expressions);
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	auto entry = store->Lookup(key);
+	auto entry = store->Lookup(context, key);
 
 	if (!entry) {
 		// Cache miss: build cache inline
 		entry = BuildCacheForPredicate(context, filter.expressions, get);
 		if (entry) {
-			store->Upsert(key, entry);
+			store->Upsert(context, key, entry);
 		}
 	}
 

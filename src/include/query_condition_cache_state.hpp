@@ -88,10 +88,8 @@ public:
 	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
 	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
-	idx_t RemoveRowGroupsForTable(idx_t table_oid, const unordered_set<idx_t> &row_group_indices);
-
-	// Remove ALL entries for a table (used for INSERT invalidation). Returns count of entries removed.
-	idx_t RemoveByTable(idx_t table_oid);
+	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
+	                              const unordered_set<idx_t> &row_group_indices);
 
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
