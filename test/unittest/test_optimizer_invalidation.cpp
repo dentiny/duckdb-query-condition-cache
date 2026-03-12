@@ -1,44 +1,12 @@
 #include "catch/catch.hpp"
-#include "physical_cache_invalidator.hpp"
+#include "test_helpers_invalidation.hpp"
 #include "query_condition_cache_extension.hpp"
-#include "query_condition_cache_state.hpp"
 
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
-#include "duckdb/execution/physical_plan_generator.hpp"
-#include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 
 namespace duckdb {
-
-// Helper: build cache for (table_name, predicate) via the SQL table function.
-static void BuildCache(Connection &con, const string &table_name, const string &predicate) {
-	auto result = con.Query("SELECT * FROM condition_cache_build('" + table_name + "', '" + predicate + "')");
-	REQUIRE(result->GetError() == "");
-}
-
-// Helper: get the cache store from a connection's context.
-static shared_ptr<ConditionCacheStore> GetStore(Connection &con) {
-	return ConditionCacheStore::GetOrCreate(*con.context);
-}
-
-// Helper: look up a cache entry by table OID and predicate.
-static shared_ptr<ConditionCacheEntry> LookupEntry(Connection &con, idx_t table_oid, const string &predicate) {
-	auto store = GetStore(con);
-	return store->Lookup(*con.context, {table_oid, predicate});
-}
-
-// Helper: get the OID of a table via the catalog API.
-static idx_t GetTableOid(Connection &con, const string &table_name) {
-	con.BeginTransaction();
-	auto &context = *con.context;
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA, table_name);
-	auto oid = table_entry.oid;
-	con.Commit();
-	return oid;
-}
 
 TEST_CASE("Optimizer invalidation - DELETE removes affected row groups from cache", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
@@ -376,19 +344,6 @@ TEST_CASE("Optimizer invalidation - INSERT into partial tail row group", "[inval
 }
 
 // --- Plan injection tests (verify optimizer injects PhysicalCacheInvalidator with correct fields) ---
-
-static PhysicalCacheInvalidator *FindInvalidator(PhysicalOperator &op) {
-	if (op.type == PhysicalOperatorType::EXTENSION && op.GetName() == "CACHE_INVALIDATOR") {
-		return &op.Cast<PhysicalCacheInvalidator>();
-	}
-	for (auto &child : op.children) {
-		auto *result = FindInvalidator(child.get());
-		if (result) {
-			return result;
-		}
-	}
-	return nullptr;
-}
 
 TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for DELETE", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
