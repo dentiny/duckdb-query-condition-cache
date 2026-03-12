@@ -112,6 +112,9 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	if (!entry) {
 		// Cache miss: build cache inline.
 		entry = BuildCacheForPredicate(context, filter.expressions, get);
+		if (entry) {
+			store->Upsert(context, key, entry);
+		}
 	}
 
 	if (entry) {
