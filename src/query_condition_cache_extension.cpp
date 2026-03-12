@@ -25,7 +25,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(db_instance);
 	config.AddExtensionOption("enable_query_condition_cache",
 	                          "Enable or disable the query condition cache feature",
-	                          LogicalType::BOOLEAN, Value(true),
+	                          LogicalType {LogicalTypeId::BOOLEAN}, Value(true),
 	                          EnableQueryConditionCacheCallback);
 }
 } // namespace
