@@ -1,6 +1,8 @@
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
 
@@ -29,43 +31,36 @@ bool RowGroupFilter::IsEmpty() const {
 	return true;
 }
 
-// ------- CONDITION_CACHE_STORE -------
+// ------- CONDITION_CACHE_ENTRY -------
 
-shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(const CacheKey &key) {
-	lock_guard<mutex> guard(cache_lock);
-	auto it = entries.find(key);
-	if (it != entries.end()) {
-		return it->second;
-	}
-	return nullptr;
+optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {
+	// Rough estimate: each RowGroupFilter is ~BITVECTOR_ARRAY_SIZE * 8 bytes
+	// Plus overhead for the map structure
+	idx_t estimated_size = sizeof(ConditionCacheEntry);
+	estimated_size += bitvectors.size() * (sizeof(idx_t) + sizeof(RowGroupFilter) + 32); // map overhead
+	return optional_idx(estimated_size);
 }
 
-void ConditionCacheStore::Upsert(const CacheKey &key, shared_ptr<ConditionCacheEntry> entry) {
+// ------- CONDITION_CACHE_STORE -------
+
+string ConditionCacheStore::MakeCacheKeyString(const CacheKey &key) {
+	// Format: "query_condition_cache_entry:{table_oid}:{filter_key}"
+	return StringUtil::Format("query_condition_cache_entry:%llu:%s", key.table_oid, key.filter_key);
+}
+
+shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(ClientContext &context, const CacheKey &key) {
+	auto &cache = ObjectCache::GetObjectCache(context);
+	string cache_key = MakeCacheKeyString(key);
+	return cache.Get<ConditionCacheEntry>(cache_key);
+}
+
+void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry) {
 	if (!entry) {
 		throw InvalidInputException("ConditionCacheStore::Upsert: entry must not be null");
 	}
-	lock_guard<mutex> guard(cache_lock);
-	auto result = entries.emplace(key, entry);
-	if (!result.second) {
-		result.first->second = std::move(entry);
-	}
-}
-
-void ConditionCacheStore::Clear() {
-	lock_guard<mutex> guard(cache_lock);
-	entries.clear();
-}
-
-vector<shared_ptr<ConditionCacheEntry>> ConditionCacheStore::GetAll() {
-	vector<shared_ptr<ConditionCacheEntry>> result;
-	{
-		lock_guard<mutex> guard(cache_lock);
-		result.reserve(entries.size());
-		for (const auto &pair : entries) {
-			result.push_back(pair.second);
-		}
-	}
-	return result;
+	auto &cache = ObjectCache::GetObjectCache(context);
+	string cache_key = MakeCacheKeyString(key);
+	cache.Put(cache_key, std::move(entry));
 }
 
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {
