@@ -28,7 +28,7 @@ SELECT count(*), sum(length(col1)), sum(length(col2)), sum(length(col3)),
 FROM events_single WHERE text_col LIKE '%ERROR%' OR text_col LIKE '%XYZNOTEXIST%';
 
 .print '--- baseline (no cache) ---'
-SET use_query_condition_cache = false;
+SET enable_query_condition_cache = false;
 .timer on
 
 SELECT count(*), sum(length(col1)), sum(length(col2)), sum(length(col3)),
@@ -46,7 +46,7 @@ FROM events_single WHERE text_col LIKE '%ERROR%' OR text_col LIKE '%XYZNOTEXIST%
 .timer off
 
 .print '--- cache (build + hit) ---'
-SET use_query_condition_cache = true;
+SET enable_query_condition_cache = true;
 .timer on
 
 SELECT count(*), sum(length(col1)), sum(length(col2)), sum(length(col3)),

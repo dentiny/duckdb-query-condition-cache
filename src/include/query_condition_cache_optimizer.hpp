@@ -17,10 +17,10 @@ public:
 	//! Post-optimize: inject cache filters into LogicalGet nodes that were matched pre-optimize
 	static void OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
-	//! Check if use_query_condition_cache setting is enabled
+private:
+	//! Check if enable_query_condition_cache setting is enabled
 	static bool IsSettingEnabled(ClientContext &context);
 
-private:
 	//! Walk plan pre-pushdown: find LogicalFilter→LogicalGet, compute key, lookup/build cache
 	static void PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan, bool inside_dml);
 

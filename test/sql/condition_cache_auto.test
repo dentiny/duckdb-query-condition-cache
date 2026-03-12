@@ -6,7 +6,7 @@ require query_condition_cache
 
 # Start with cache disabled
 statement ok
-SET use_query_condition_cache = false;
+SET enable_query_condition_cache = false;
 
 # Create table with multiple row groups (>122880 rows)
 statement ok
@@ -20,7 +20,7 @@ SELECT count(*) FROM t WHERE val = 42;
 
 # Enable automatic cache
 statement ok
-SET use_query_condition_cache = true;
+SET enable_query_condition_cache = true;
 
 # First query with setting ON: builds cache and returns correct results
 query I
@@ -48,7 +48,7 @@ SELECT count(*) FROM t WHERE val = 42 AND id < 200000;
 
 # Setting can be toggled off
 statement ok
-SET use_query_condition_cache = false;
+SET enable_query_condition_cache = false;
 
 # With setting off, queries still return correct results (no automatic behavior)
 query I
@@ -64,7 +64,7 @@ Cache Built: 245/245 vectors, 5/5 row groups
 
 # Re-enable and test that previously manually built cache can be used
 statement ok
-SET use_query_condition_cache = true;
+SET enable_query_condition_cache = true;
 
 query I
 SELECT count(*) FROM t WHERE val = 99;

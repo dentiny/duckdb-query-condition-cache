@@ -144,17 +144,17 @@ def benchmark_query(con, label: str, sql: str, repeat: int) -> dict:
       4. cache ON,  repeated   (cache hit — median of `repeat` runs)
     """
     # Step 1 & 2: cache OFF
-    con.execute("SET use_query_condition_cache = false;")
+    con.execute("SET enable_query_condition_cache = false;")
     t_cold = time_query(con, sql, 1)[0]
     t_warm_no_cache = time_query(con, sql, repeat)
 
     # Step 3 & 4: cache ON
-    con.execute("SET use_query_condition_cache = true;")
+    con.execute("SET enable_query_condition_cache = true;")
     t_build = time_query(con, sql, 1)[0]
     t_cache_hit = time_query(con, sql, repeat)
 
     # Always turn cache back off so queries don't interfere
-    con.execute("SET use_query_condition_cache = false;")
+    con.execute("SET enable_query_condition_cache = false;")
 
     baseline = statistics.median(t_warm_no_cache)
     cache_hit = statistics.median(t_cache_hit)

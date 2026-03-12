@@ -35,7 +35,7 @@ QueryConditionCacheOptimizer::QueryConditionCacheOptimizer() {
 
 bool QueryConditionCacheOptimizer::IsSettingEnabled(ClientContext &context) {
 	Value val;
-	auto result = context.TryGetCurrentSetting("use_query_condition_cache", val);
+	auto result = context.TryGetCurrentSetting("enable_query_condition_cache", val);
 	if (!result) {
 		return false;
 	}
