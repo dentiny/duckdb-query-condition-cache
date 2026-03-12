@@ -3,7 +3,7 @@
 
 #include "duckdb/common/exception.hpp"
 
-using namespace duckdb;
+namespace duckdb {
 
 TEST_CASE("ConditionCacheStore - basic operations", "[cache_store]") {
 	ConditionCacheStore store;
@@ -75,3 +75,4 @@ TEST_CASE("ConditionCacheStore - basic operations", "[cache_store]") {
 		REQUIRE_THROWS_AS(store.Upsert({1, "col:>5"}, nullptr), InvalidInputException);
 	}
 }
+} // namespace duckdb

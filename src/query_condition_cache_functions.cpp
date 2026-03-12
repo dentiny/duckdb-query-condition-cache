@@ -222,6 +222,12 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	if (parsed_exprs.empty()) {
 		throw InvalidInputException("condition_cache_build: failed to parse predicate");
 	}
+	// Reject bare column references (e.g. predicate = 'val')
+	if (parsed_exprs[0]->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+		throw InvalidInputException(
+		    "condition_cache_build: predicate must be a boolean expression, not a column reference");
+	}
+
 	auto binder = Binder::CreateBinder(context);
 	physical_index_set_t bound_columns;
 	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
@@ -252,6 +258,68 @@ TableFunction ConditionCacheBuildFunction() {
 	    "condition_cache_build",
 	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
 	    ConditionCacheBuildExecute, ConditionCacheBuildBind, ConditionCacheBuildInit);
+	return func;
+}
+
+// ------- condition_cache_info(table_name VARCHAR, predicate VARCHAR) -------
+// Returns the number of cached row groups for a given (table, predicate) pair.
+// Returns 0 if no cache entry exists.
+
+struct ConditionCacheInfoBindData : public TableFunctionData {
+	idx_t table_oid;
+	string predicate_sql;
+};
+
+struct ConditionCacheInfoState : public GlobalTableFunctionState {
+	bool done = false;
+};
+
+unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<string> &names) {
+	auto result = make_uniq<ConditionCacheInfoBindData>();
+	result->predicate_sql = input.inputs[1].GetValue<string>();
+
+	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
+	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
+
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, qname.catalog, qname.schema, qname.name);
+	result->table_oid = table_entry.oid;
+
+	names.emplace_back("cached_row_groups");
+	return_types.emplace_back(LogicalType::INTEGER);
+
+	return result;
+}
+
+unique_ptr<GlobalTableFunctionState> ConditionCacheInfoInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<ConditionCacheInfoState>();
+}
+
+void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &gstate = data_p.global_state->Cast<ConditionCacheInfoState>();
+	if (gstate.done) {
+		return;
+	}
+	gstate.done = true;
+
+	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheInfoBindData>();
+	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
+	auto store = ConditionCacheStore::GetOrCreate(context);
+	auto entry = store->Lookup(key);
+
+	output.SetCardinality(1);
+	if (entry) {
+		output.data[0].SetValue(0, Value::INTEGER(static_cast<int32_t>(entry->bitvectors.size())));
+	} else {
+		output.data[0].SetValue(0, Value::INTEGER(0));
+	}
+}
+
+TableFunction ConditionCacheInfoFunction() {
+	TableFunction func(
+	    "condition_cache_info",
+	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
+	    ConditionCacheInfoExecute, ConditionCacheInfoBind, ConditionCacheInfoInit);
 	return func;
 }
 
