@@ -4,7 +4,6 @@
 using namespace duckdb;
 
 TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
-
 	SECTION("default constructor is empty") {
 		RowGroupFilter bv;
 		REQUIRE(bv.IsEmpty());

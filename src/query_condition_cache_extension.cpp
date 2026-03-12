@@ -14,19 +14,18 @@ namespace {
 // This callback throws an exception to confirm it's being called
 void EnableQueryConditionCacheCallback(ClientContext &context, SetScope scope, Value &parameter) {
 	// Throw an error to verify this callback is being called
-	throw InvalidInputException("enable_query_condition_cache callback was called! Setting value: %s", parameter.ToString());
+	throw InvalidInputException("enable_query_condition_cache callback was called! Setting value: %s",
+	                            parameter.ToString());
 }
 
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheBuildFunction());
-	
+
 	// Register extension settings
 	auto &db_instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(db_instance);
-	config.AddExtensionOption("enable_query_condition_cache",
-	                          "Enable or disable the query condition cache feature",
-	                          LogicalType {LogicalTypeId::BOOLEAN}, Value(true),
-	                          EnableQueryConditionCacheCallback);
+	config.AddExtensionOption("enable_query_condition_cache", "Enable or disable the query condition cache feature",
+	                          LogicalType {LogicalTypeId::BOOLEAN}, Value(true), EnableQueryConditionCacheCallback);
 }
 } // namespace
 

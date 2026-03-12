@@ -239,7 +239,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	// TODO: Invalidate cache on table modification (INSERT/DELETE/UPDATE/VACUUM)
 	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	store->Upsert(key, std::move(entry));
+	store->Upsert(context, key, std::move(entry));
 
 	output.SetCardinality(1);
 	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",

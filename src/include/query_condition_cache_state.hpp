@@ -48,8 +48,19 @@ struct CacheKeyHashFunction {
 };
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
-struct ConditionCacheEntry {
+struct ConditionCacheEntry : public ObjectCacheEntry {
 	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
+
+	static string ObjectType() {
+		return "query_condition_cache_entry";
+	}
+
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	// Return estimated memory usage for LRU eviction
+	optional_idx GetEstimatedCacheMemory() const override;
 };
 
 // Stored in DuckDB's per-database ObjectCache
@@ -70,24 +81,17 @@ public:
 	}
 
 	// Lookup by cache key; returns nullptr if not found
-	shared_ptr<ConditionCacheEntry> Lookup(const CacheKey &key);
+	shared_ptr<ConditionCacheEntry> Lookup(ClientContext &context, const CacheKey &key);
 
 	// Upsert an entry
-	void Upsert(const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
-
-	// Clear all entries
-	void Clear();
-
-	// Get all entries
-	vector<shared_ptr<ConditionCacheEntry>> GetAll();
+	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:
-	mutex cache_lock;
-	// TODO: Consider sharding for scalability
-	unordered_map<CacheKey, shared_ptr<ConditionCacheEntry>, CacheKeyHashFunction> entries;
+	// Generate a unique cache key string from CacheKey
+	static string MakeCacheKeyString(const CacheKey &key);
 };
 
 } // namespace duckdb
