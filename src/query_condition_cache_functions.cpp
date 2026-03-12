@@ -82,9 +82,7 @@ void RemapColumnIndices(Expression &expr, const unordered_map<column_t, idx_t> &
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 		auto &ref = expr.Cast<BoundReferenceExpression>();
 		auto it = mapping.find(ref.index);
-		if (it == mapping.end()) {
-			throw InternalException("RemapColumnIndices: unmapped column index %llu (generated column?)", ref.index);
-		}
+		ALWAYS_ASSERT(it != mapping.end());
 		ref.index = it->second;
 	}
 	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { RemapColumnIndices(child, mapping); });
