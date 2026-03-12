@@ -4,6 +4,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
@@ -76,6 +77,12 @@ public:
 
 	// Get all entries
 	vector<shared_ptr<ConditionCacheEntry>> GetAll();
+
+	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
+	idx_t RemoveRowGroupsForTable(idx_t table_oid, const unordered_set<idx_t> &row_group_indices);
+
+	// Remove ALL entries for a table (used for INSERT invalidation). Returns count of entries removed.
+	idx_t RemoveByTable(idx_t table_oid);
 
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);

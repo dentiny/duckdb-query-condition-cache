@@ -10,7 +10,7 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 
-using namespace duckdb;
+namespace duckdb {
 
 TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 	DuckDB db(nullptr);
@@ -92,3 +92,4 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		REQUIRE(entry->bitvectors.empty());
 	}
 }
+} // namespace duckdb
