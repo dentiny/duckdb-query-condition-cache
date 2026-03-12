@@ -1,5 +1,0 @@
-{
-  "description": "Run tests with enable_query_condition_cache setting disabled",
-  "on_new_connection": "SET enable_query_condition_cache = false;",
-  "skip_compiled": "true"
-}
