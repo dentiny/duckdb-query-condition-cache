@@ -1,6 +1,7 @@
 #include "catch/catch.hpp"
-#include "test_helpers_invalidation.hpp"
+#include "physical_cache_invalidator.hpp"
 #include "query_condition_cache_extension.hpp"
+#include "test_helpers_invalidation.hpp"
 
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
@@ -407,8 +408,7 @@ TEST_CASE("Optimizer invalidation - no invalidator for SELECT", "[invalidation][
 	REQUIRE_FALSE(invalidator);
 }
 
-TEST_CASE("Optimizer invalidation - injects MERGE invalidator for INSERT ON CONFLICT",
-          "[invalidation][optimizer]") {
+TEST_CASE("Optimizer invalidation - injects MERGE invalidator for INSERT ON CONFLICT", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
 	db.LoadStaticExtension<QueryConditionCacheExtension>();
 	Connection con(db);
@@ -421,7 +421,9 @@ TEST_CASE("Optimizer invalidation - injects MERGE invalidator for INSERT ON CONF
 	REQUIRE_FALSE(prepared->HasError());
 	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
 	REQUIRE(invalidator);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::MERGE);
 	REQUIRE(invalidator->table_oid == table_oid);
+	REQUIRE(invalidator->pre_insert_row_count == 1);
 }
 
 TEST_CASE("Optimizer invalidation - injects MERGE invalidator for MERGE", "[invalidation][optimizer]") {
