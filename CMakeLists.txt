@@ -9,7 +9,7 @@ project(${TARGET_NAME})
 
 if(UNIX OR APPLE)
   set(CMAKE_CXX_FLAGS
-      "${CMAKE_CXX_FLAGS} -Wno-c++17-extensions -Wunused-variable -Wunused-function"
+      "${CMAKE_CXX_FLAGS} -Wno-c++17-extensions -Wno-c++20-extensions -Wunused-variable -Wunused-function"
   )
 endif()
 

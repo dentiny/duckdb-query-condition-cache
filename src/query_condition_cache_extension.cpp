@@ -10,6 +10,13 @@
 namespace duckdb {
 
 namespace {
+// Callback to verify the setting is being accessed
+// This callback throws an exception to confirm it's being called
+void EnableQueryConditionCacheCallback(ClientContext &context, SetScope scope, Value &parameter) {
+	// Throw an error to verify this callback is being called
+	throw InvalidInputException("enable_query_condition_cache callback was called! Setting value: %s", parameter.ToString());
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheBuildFunction());
 	loader.RegisterFunction(ConditionCacheInfoFunction());
