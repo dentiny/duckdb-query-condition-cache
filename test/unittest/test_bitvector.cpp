@@ -1,7 +1,7 @@
 #include "catch/catch.hpp"
 #include "query_condition_cache_state.hpp"
 
-using namespace duckdb;
+namespace duckdb {
 
 TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 	SECTION("default constructor is empty") {
@@ -46,3 +46,4 @@ TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 		REQUIRE_FALSE(bv.VectorHasRows(6));
 	}
 }
+} // namespace duckdb

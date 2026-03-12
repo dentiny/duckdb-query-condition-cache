@@ -26,6 +26,12 @@ SELECT status FROM condition_cache_build('t', 'val = 42');
 ----
 Cache Built: 245/245 vectors, 5/5 row groups
 
+# Non-BOOLEAN predicate throws error
+statement error
+SELECT * FROM condition_cache_build('t', 'val');
+----
+predicate must be a boolean expression
+
 # Nonexistent table throws error
 statement error
 SELECT * FROM condition_cache_build('nonexistent', 'val = 42');
@@ -61,12 +67,3 @@ statement error
 SELECT * FROM condition_cache_build('bad_catalog.main.t', 'val = 42');
 ----
 Catalog "bad_catalog" does not exist
-
-# Non-castable column as predicate throws error
-statement ok
-CREATE TABLE t_str AS SELECT 'hello' AS name;
-
-statement error
-SELECT * FROM condition_cache_build('t_str', 'name');
-----
-Could not convert string
