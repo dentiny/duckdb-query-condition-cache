@@ -27,9 +27,19 @@ struct LogicalCacheInvalidator : public LogicalExtensionOperator {
 
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override;
 	vector<ColumnBinding> GetColumnBindings() override;
+	string GetExtensionName() const override;
+	void Serialize(Serializer &serializer) const override;
 
 protected:
 	void ResolveTypes() override;
+};
+
+//! OperatorExtension for deserializing LogicalCacheInvalidator
+class CacheInvalidatorOperatorExtension : public OperatorExtension {
+public:
+	CacheInvalidatorOperatorExtension();
+	std::string GetName() override;
+	unique_ptr<LogicalExtensionOperator> Deserialize(Deserializer &deserializer) override;
 };
 
 } // namespace duckdb

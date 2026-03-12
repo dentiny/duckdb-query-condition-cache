@@ -108,6 +108,16 @@ idx_t ConditionCacheStore::RemoveByTable(idx_t table_oid) {
 	return removed_count;
 }
 
+bool ConditionCacheStore::HasEntriesForTable(idx_t table_oid) {
+	lock_guard<mutex> guard(cache_lock);
+	for (auto &pair : entries) {
+		if (pair.first.table_oid == table_oid) {
+			return true;
+		}
+	}
+	return false;
+}
+
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	return cache.GetOrCreate<ConditionCacheStore>(CACHE_KEY);

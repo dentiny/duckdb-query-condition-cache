@@ -55,12 +55,29 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 		return;
 	}
 	tl_cache_apply_pending.clear();
-	PreOptimizeWalk(input.context, plan);
+	try {
+		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false);
+	} catch (...) {
+		// If anything goes wrong during pre-optimization, clear pending entries
+		// and let the query proceed without cache optimization
+		tl_cache_apply_pending.clear();
+	}
 }
 
-void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan) {
+void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                                   bool inside_dml) {
+	// Check if this node is a DML operator — skip cache building in DML subplans
+	bool is_dml =
+	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
+	    plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_MERGE_INTO;
+	bool child_inside_dml = inside_dml || is_dml;
+
 	for (auto &child : plan->children) {
-		PreOptimizeWalk(context, child);
+		PreOptimizeWalk(context, child, child_inside_dml);
+	}
+
+	if (inside_dml) {
+		return; // Don't build caches for predicates inside DML subplans
 	}
 
 	if (plan->type != LogicalOperatorType::LOGICAL_FILTER || plan->children.empty()) {
@@ -80,13 +97,32 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 		return;
 	}
 
+	auto &duck_table = table->Cast<DuckTableEntry>();
+	auto &storage = duck_table.GetStorage();
+
+	// Skip caching for small tables (< 1 row group) — no benefit
+	if (storage.GetTotalRows() < DEFAULT_ROW_GROUP_SIZE) {
+		return;
+	}
+
+	// Skip caching for tables with indexes — index scans are typically more efficient
+	if (storage.HasIndexes()) {
+		return;
+	}
+
 	auto key = ComputePredicateKey(table->oid, filter.expressions);
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(key);
 
 	if (!entry) {
-		// Cache miss: build cache inline
-		entry = BuildCacheForPredicate(context, filter.expressions, get);
+		// Cache miss: build cache inline.
+		// Wrap in try-catch because predicate evaluation may throw (e.g. sqrt of negative)
+		try {
+			entry = BuildCacheForPredicate(context, filter.expressions, get);
+		} catch (...) {
+			// Predicate cannot be safely evaluated on all rows; skip caching
+			entry = nullptr;
+		}
 		if (entry) {
 			store->Upsert(key, entry);
 		}
@@ -202,7 +238,7 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(unique_ptr<LogicalOperator>
 	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
 	                             make_uniq<CacheExpressionFilter>(std::move(func_expr), entry));
 
-	// Ensure ROW_ID column is in the scan
+	// Ensure ROW_ID column is in the scan so the filter can access it
 	bool has_rowid = false;
 	for (auto &col : get.GetColumnIds()) {
 		if (col.IsRowIdColumn()) {
@@ -246,10 +282,19 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 		WalkPlanForDML(context, child);
 	}
 
+	// Helper lambda to check if the table has cache entries worth invalidating
+	auto has_cache_entries = [&](idx_t table_oid) -> bool {
+		auto store = ConditionCacheStore::GetOrCreate(context);
+		return store->HasEntriesForTable(table_oid);
+	};
+
 	switch (op->type) {
 	case LogicalOperatorType::LOGICAL_DELETE: {
 		auto &del = op->Cast<LogicalDelete>();
 		auto table_oid = del.table.oid;
+		if (!has_cache_entries(table_oid)) {
+			break;
+		}
 
 		// Copy the row_id expression; it will be resolved during column binding resolution
 		auto row_id_expr = del.expressions[0]->Copy();
@@ -263,6 +308,9 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 	case LogicalOperatorType::LOGICAL_UPDATE: {
 		auto &upd = op->Cast<LogicalUpdate>();
 		auto table_oid = upd.table.oid;
+		if (!has_cache_entries(table_oid)) {
+			break;
+		}
 
 		auto invalidator = make_uniq<LogicalCacheInvalidator>(table_oid);
 		invalidator->children = std::move(upd.children);
@@ -273,6 +321,9 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 	case LogicalOperatorType::LOGICAL_INSERT: {
 		auto &ins = op->Cast<LogicalInsert>();
 		auto table_oid = ins.table.oid;
+		if (!has_cache_entries(table_oid)) {
+			break;
+		}
 
 		auto &duck_table = ins.table.Cast<DuckTableEntry>();
 		auto pre_insert_rows = duck_table.GetStorage().GetTotalRows();
@@ -286,6 +337,9 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 	case LogicalOperatorType::LOGICAL_MERGE_INTO: {
 		auto &merge = op->Cast<LogicalMergeInto>();
 		auto table_oid = merge.table.oid;
+		if (!has_cache_entries(table_oid)) {
+			break;
+		}
 		auto &duck_table = merge.table.Cast<DuckTableEntry>();
 		auto pre_insert_rows = duck_table.GetStorage().GetTotalRows();
 

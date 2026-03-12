@@ -84,6 +84,9 @@ public:
 	// Remove ALL entries for a table (used for INSERT invalidation). Returns count of entries removed.
 	idx_t RemoveByTable(idx_t table_oid);
 
+	// Check if any entries exist for a given table OID
+	bool HasEntriesForTable(idx_t table_oid);
+
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
