@@ -72,7 +72,7 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 	vector<string> filter_keys;
 
 	static string ObjectType() {
-		return "qcc_filter_key_index";
+		return "query_condition_cache_filter_key_index";
 	}
 
 	string GetObjectType() override {
