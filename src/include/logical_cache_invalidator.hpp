@@ -9,14 +9,10 @@ struct LogicalCacheInvalidator : public LogicalExtensionOperator {
 	idx_t table_oid;
 	CacheInvalidatorMode mode;
 	idx_t row_id_column_index;  // for ROW_ID mode
-	bool row_id_is_last_column; // for UPDATE (resolve in CreatePlan)
 	idx_t pre_insert_row_count; // for INSERT/MERGE modes
 
-	// For DELETE: pass the row_id expression to be resolved during column binding.
+	// For DELETE/UPDATE: pass the row_id expression to be resolved during column binding.
 	LogicalCacheInvalidator(idx_t table_oid, unique_ptr<Expression> row_id_expr);
-
-	// For UPDATE: row_id is always the last column of the child output.
-	explicit LogicalCacheInvalidator(idx_t table_oid);
 
 	// For INSERT: count rows and compute affected range.
 	LogicalCacheInvalidator(idx_t table_oid, idx_t pre_insert_row_count);
