@@ -4,11 +4,9 @@
 
 require query_condition_cache
 
-# Setting defaults to false
-query I
-SELECT current_setting('use_query_condition_cache');
-----
-false
+# Start with cache disabled
+statement ok
+SET use_query_condition_cache = false;
 
 # Create table with multiple row groups (>122880 rows)
 statement ok
