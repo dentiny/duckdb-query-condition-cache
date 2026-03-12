@@ -112,7 +112,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 
 	auto key = ComputePredicateKey(table->oid, filter.expressions);
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	auto entry = store->Lookup(key);
+	auto entry = store->Lookup(context, key);
 
 	if (!entry) {
 		// Cache miss: build cache inline.
@@ -124,7 +124,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 			entry = nullptr;
 		}
 		if (entry) {
-			store->Upsert(key, entry);
+			store->Upsert(context, key, entry);
 		}
 	}
 
@@ -211,7 +211,7 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> 
 		return;
 	}
 
-	InjectCacheFilter(plan, std::move(it->second));
+	InjectCacheFilter(plan, it->second);
 	tl_cache_apply_pending.erase(it);
 }
 
@@ -220,7 +220,7 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> 
 // ============================================================================
 
 void QueryConditionCacheOptimizer::InjectCacheFilter(unique_ptr<LogicalOperator> &get_plan,
-                                                     shared_ptr<ConditionCacheEntry> entry) {
+                                                     const shared_ptr<ConditionCacheEntry> &entry) {
 	auto &get = get_plan->Cast<LogicalGet>();
 
 	ScalarFunction func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
@@ -285,7 +285,7 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 	// Helper lambda to check if the table has cache entries worth invalidating
 	auto has_cache_entries = [&](idx_t table_oid) -> bool {
 		auto store = ConditionCacheStore::GetOrCreate(context);
-		return store->HasEntriesForTable(table_oid);
+		return store->HasEntriesForTable(context, table_oid);
 	};
 
 	switch (op->type) {

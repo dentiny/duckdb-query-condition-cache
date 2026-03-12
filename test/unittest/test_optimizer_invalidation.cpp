@@ -23,7 +23,7 @@ static shared_ptr<ConditionCacheStore> GetStore(Connection &con) {
 // Helper: look up a cache entry by table OID and predicate.
 static shared_ptr<ConditionCacheEntry> LookupEntry(Connection &con, idx_t table_oid, const string &predicate) {
 	auto store = GetStore(con);
-	return store->Lookup({table_oid, predicate});
+	return store->Lookup(*con.context, {table_oid, predicate});
 }
 
 // Helper: get the OID of a table via the catalog API.

@@ -57,7 +57,7 @@ unique_ptr<FunctionData> ConditionCacheBuildBind(ClientContext &context, TableFu
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
 
 	names.emplace_back("status");
-	return_types.emplace_back(LogicalType {LogicalTypeId::VARCHAR});
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	return result;
 }
@@ -247,7 +247,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	// TODO: Invalidate cache on table modification (INSERT/DELETE/UPDATE/VACUUM)
 	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	store->Upsert(key, std::move(entry));
+	store->Upsert(context, key, std::move(entry));
 
 	output.SetCardinality(1);
 	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
@@ -307,7 +307,7 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheInfoBindData>();
 	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	auto entry = store->Lookup(key);
+	auto entry = store->Lookup(context, key);
 
 	output.SetCardinality(1);
 	if (entry) {

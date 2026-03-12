@@ -6,6 +6,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "logical_cache_invalidator.hpp"
 #include "query_condition_cache_filter.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 #include "query_condition_cache_functions.hpp"
 #include "query_condition_cache_optimizer.hpp"
 
@@ -30,11 +31,11 @@ void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType {LogicalTypeId::BOOLEAN}, Value::BOOLEAN(false));
 
 	// Register operator extension for serialization/deserialization support
-	config.operator_extensions.push_back(make_uniq<CacheInvalidatorOperatorExtension>());
+	OperatorExtension::Register(config, make_uniq<CacheInvalidatorOperatorExtension>());
 
 	// Register optimizer extensions
-	config.optimizer_extensions.push_back(QueryConditionCacheOptimizer());
-	config.optimizer_extensions.push_back(CacheInvalidationOptimizer());
+	OptimizerExtension::Register(config, QueryConditionCacheOptimizer());
+	OptimizerExtension::Register(config, CacheInvalidationOptimizer());
 }
 } // namespace
 

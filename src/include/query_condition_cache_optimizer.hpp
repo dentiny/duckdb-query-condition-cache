@@ -35,7 +35,7 @@ private:
 	BuildCacheForPredicate(ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get);
 
 	//! Inject cache filter on a LogicalGet via ROW_ID table filter
-	static void InjectCacheFilter(unique_ptr<LogicalOperator> &get_plan, shared_ptr<ConditionCacheEntry> entry);
+	static void InjectCacheFilter(unique_ptr<LogicalOperator> &get_plan, const shared_ptr<ConditionCacheEntry> &entry);
 };
 
 class CacheInvalidationOptimizer : public OptimizerExtension {

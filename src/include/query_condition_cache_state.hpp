@@ -49,8 +49,43 @@ struct CacheKeyHashFunction {
 };
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
-struct ConditionCacheEntry {
+struct ConditionCacheEntry : public ObjectCacheEntry {
 	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
+
+	static string ObjectType() {
+		return "query_condition_cache_entry";
+	}
+
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	// Return estimated memory usage for LRU eviction
+	optional_idx GetEstimatedCacheMemory() const override;
+};
+
+// Per-table index stored in ObjectCache (non-evictable). Holds the set of
+// filter_keys for which ConditionCacheEntry objects exist, enabling
+// invalidation lookups by table_oid.
+struct TableFilterKeyIndex : public ObjectCacheEntry {
+	mutex lock;
+	vector<string> filter_keys;
+
+	static string ObjectType() {
+		return "query_condition_cache_filter_key_index";
+	}
+
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	void Add(const string &filter_key);
+	void Remove(const string &filter_key);
+	vector<string> GetAll();
 };
 
 // Stored in DuckDB's per-database ObjectCache
@@ -66,34 +101,29 @@ public:
 		return ObjectType();
 	}
 
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
 	// Lookup by cache key; returns nullptr if not found
-	shared_ptr<ConditionCacheEntry> Lookup(const CacheKey &key);
+	shared_ptr<ConditionCacheEntry> Lookup(ClientContext &context, const CacheKey &key);
 
 	// Upsert an entry
-	void Upsert(const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
-
-	// Clear all entries
-	void Clear();
-
-	// Get all entries
-	vector<shared_ptr<ConditionCacheEntry>> GetAll();
+	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
 	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
-	idx_t RemoveRowGroupsForTable(idx_t table_oid, const unordered_set<idx_t> &row_group_indices);
-
-	// Remove ALL entries for a table (used for INSERT invalidation). Returns count of entries removed.
-	idx_t RemoveByTable(idx_t table_oid);
+	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
+	                              const unordered_set<idx_t> &row_group_indices);
 
 	// Check if any entries exist for a given table OID
-	bool HasEntriesForTable(idx_t table_oid);
+	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
 
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:
-	mutex cache_lock;
-	// TODO: Consider sharding for scalability
-	unordered_map<CacheKey, shared_ptr<ConditionCacheEntry>, CacheKeyHashFunction> entries;
+	static string MakeCacheKeyString(const CacheKey &key);
+	static string MakeFilterKeyIndexKey(idx_t table_oid);
 };
 
 } // namespace duckdb
