@@ -1,5 +1,7 @@
 #include "logical_cache_invalidator.hpp"
 
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 
@@ -55,6 +57,73 @@ vector<ColumnBinding> LogicalCacheInvalidator::GetColumnBindings() {
 
 void LogicalCacheInvalidator::ResolveTypes() {
 	types = children[0]->types;
+}
+
+string LogicalCacheInvalidator::GetExtensionName() const {
+	return "query_condition_cache";
+}
+
+void LogicalCacheInvalidator::Serialize(Serializer &serializer) const {
+	LogicalExtensionOperator::Serialize(serializer);
+	serializer.WriteProperty(300, "table_oid", table_oid);
+	serializer.WriteProperty(301, "mode", static_cast<uint8_t>(mode));
+	serializer.WriteProperty(302, "row_id_column_index", row_id_column_index);
+	serializer.WriteProperty(303, "row_id_is_last_column", row_id_is_last_column);
+	serializer.WriteProperty(304, "pre_insert_row_count", pre_insert_row_count);
+	serializer.WritePropertyWithDefault(305, "expressions", expressions);
+}
+
+// --- CacheInvalidatorOperatorExtension ---
+
+static BoundStatement CacheInvalidatorBind(ClientContext &context, Binder &binder, OperatorExtensionInfo *info,
+                                           SQLStatement &statement) {
+	// We don't bind any statements — return empty plan to signal "not handled"
+	return BoundStatement();
+}
+
+CacheInvalidatorOperatorExtension::CacheInvalidatorOperatorExtension() {
+	Bind = CacheInvalidatorBind;
+}
+
+std::string CacheInvalidatorOperatorExtension::GetName() {
+	return "query_condition_cache";
+}
+
+unique_ptr<LogicalExtensionOperator> CacheInvalidatorOperatorExtension::Deserialize(Deserializer &deserializer) {
+	auto oid = deserializer.ReadProperty<idx_t>(300, "table_oid");
+	auto mode_val = deserializer.ReadProperty<uint8_t>(301, "mode");
+	auto row_id_col = deserializer.ReadProperty<idx_t>(302, "row_id_column_index");
+	auto is_last_col = deserializer.ReadProperty<bool>(303, "row_id_is_last_column");
+	auto pre_insert = deserializer.ReadProperty<idx_t>(304, "pre_insert_row_count");
+	auto exprs = deserializer.ReadPropertyWithDefault<vector<unique_ptr<Expression>>>(305, "expressions");
+
+	auto mode = static_cast<CacheInvalidatorMode>(mode_val);
+
+	unique_ptr<LogicalCacheInvalidator> result;
+	switch (mode) {
+	case CacheInvalidatorMode::ROW_ID:
+		if (is_last_col) {
+			// UPDATE mode
+			result = make_uniq<LogicalCacheInvalidator>(oid);
+		} else {
+			// DELETE mode — restore the serialized row_id expression
+			unique_ptr<Expression> row_id_expr;
+			if (!exprs.empty()) {
+				row_id_expr = std::move(exprs[0]);
+			} else {
+				row_id_expr = make_uniq<BoundReferenceExpression>(LogicalType::BIGINT, row_id_col);
+			}
+			result = make_uniq<LogicalCacheInvalidator>(oid, std::move(row_id_expr));
+		}
+		break;
+	case CacheInvalidatorMode::INSERT:
+		result = make_uniq<LogicalCacheInvalidator>(oid, pre_insert);
+		break;
+	case CacheInvalidatorMode::MERGE:
+		result = make_uniq<LogicalCacheInvalidator>(oid, row_id_col, pre_insert);
+		break;
+	}
+	return result;
 }
 
 } // namespace duckdb

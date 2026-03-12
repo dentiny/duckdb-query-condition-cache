@@ -115,6 +115,9 @@ public:
 	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
 	                              const unordered_set<idx_t> &row_group_indices);
 
+	// Check if any entries exist for a given table OID
+	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
+
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 

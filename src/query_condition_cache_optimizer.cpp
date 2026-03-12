@@ -55,12 +55,29 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 		return;
 	}
 	tl_cache_apply_pending.clear();
-	PreOptimizeWalk(input.context, plan);
+	try {
+		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false);
+	} catch (...) {
+		// If anything goes wrong during pre-optimization, clear pending entries
+		// and let the query proceed without cache optimization
+		tl_cache_apply_pending.clear();
+	}
 }
 
-void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan) {
+void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                                   bool inside_dml) {
+	// Check if this node is a DML operator — skip cache building in DML subplans
+	bool is_dml =
+	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
+	    plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_MERGE_INTO;
+	bool child_inside_dml = inside_dml || is_dml;
+
 	for (auto &child : plan->children) {
-		PreOptimizeWalk(context, child);
+		PreOptimizeWalk(context, child, child_inside_dml);
+	}
+
+	if (inside_dml) {
+		return; // Don't build caches for predicates inside DML subplans
 	}
 
 	if (plan->type != LogicalOperatorType::LOGICAL_FILTER || plan->children.empty()) {
@@ -80,12 +97,20 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 		return;
 	}
 
+	auto &duck_table = table->Cast<DuckTableEntry>();
+	auto &storage = duck_table.GetStorage();
+
+	// Skip caching for tables with indexes — index scans are typically more efficient
+	if (storage.HasIndexes()) {
+		return;
+	}
+
 	auto key = ComputePredicateKey(table->oid, filter.expressions);
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(context, key);
 
 	if (!entry) {
-		// Cache miss: build cache inline
+		// Cache miss: build cache inline.
 		entry = BuildCacheForPredicate(context, filter.expressions, get);
 		if (entry) {
 			store->Upsert(context, key, entry);
@@ -202,7 +227,7 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(unique_ptr<LogicalOperator>
 	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
 	                             make_uniq<CacheExpressionFilter>(std::move(func_expr), entry));
 
-	// Ensure ROW_ID column is in the scan
+	// Ensure ROW_ID column is in the scan so the filter can access it
 	bool has_rowid = false;
 	for (auto &col : get.GetColumnIds()) {
 		if (col.IsRowIdColumn()) {

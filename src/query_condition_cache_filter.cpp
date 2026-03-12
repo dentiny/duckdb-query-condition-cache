@@ -22,11 +22,14 @@ bool ConditionCacheFilterBindData::Equals(const FunctionData &other_p) const {
 	return cache_entry == other.cache_entry;
 }
 
-// --- Bind (should never be called) ---
+// --- Bind ---
+// Called during plan deserialization/verification. Returns an empty cache entry
+// so the filter passes all rows through (safe for correctness verification).
 
 unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, ScalarFunction &bound_function,
                                                   vector<unique_ptr<Expression>> &arguments) {
-	throw InternalException("__condition_cache_filter: bind should never be called directly");
+	auto empty_entry = make_shared_ptr<ConditionCacheEntry>();
+	return make_uniq<ConditionCacheFilterBindData>(std::move(empty_entry));
 }
 
 // --- Init ---

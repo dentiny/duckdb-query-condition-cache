@@ -127,6 +127,12 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 	return removed_count;
 }
 
+bool ConditionCacheStore::HasEntriesForTable(ClientContext &context, idx_t table_oid) {
+	auto &cache = ObjectCache::GetObjectCache(context);
+	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
+	return index && !index->GetAll().empty();
+}
+
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	return cache.GetOrCreate<ConditionCacheStore>(CACHE_KEY);
