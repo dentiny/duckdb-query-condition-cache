@@ -2,6 +2,7 @@
 
 #include "query_condition_cache_extension.hpp"
 
+#include "cache_invalidation_optimizer.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "logical_cache_invalidator.hpp"
