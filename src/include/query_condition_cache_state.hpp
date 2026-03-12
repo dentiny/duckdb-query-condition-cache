@@ -65,6 +65,10 @@ public:
 		return ObjectType();
 	}
 
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
 	// Lookup by cache key; returns nullptr if not found
 	shared_ptr<ConditionCacheEntry> Lookup(const CacheKey &key);
 
