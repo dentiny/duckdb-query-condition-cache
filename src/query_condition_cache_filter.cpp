@@ -82,21 +82,16 @@ FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &sta
 	if (!NumericStats::HasMinMax(stats)) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}
-
 	auto min_val = NumericStats::GetMin<int64_t>(stats);
-	auto max_val = NumericStats::GetMax<int64_t>(stats);
-
-	idx_t min_rg = NumericCast<idx_t>(min_val) / DEFAULT_ROW_GROUP_SIZE;
-	idx_t max_rg = NumericCast<idx_t>(max_val) / DEFAULT_ROW_GROUP_SIZE;
-
-	// If any row group is not in cache (e.g. newly inserted) or has matching vectors, we can't prune
-	for (idx_t rg = min_rg; rg <= max_rg; ++rg) {
-		auto it = cache_entry->bitvectors.find(rg);
-		if (it == cache_entry->bitvectors.end() || !it->second.IsEmpty()) {
-			return FilterPropagateResult::NO_PRUNING_POSSIBLE;
-		}
+	idx_t rg = NumericCast<idx_t>(min_val) / DEFAULT_ROW_GROUP_SIZE;
+	auto it = cache_entry->bitvectors.find(rg);
+	if (it != cache_entry->bitvectors.end() && it->second.IsEmpty()) {
+		return FilterPropagateResult::FILTER_ALWAYS_FALSE;
 	}
-	return FilterPropagateResult::FILTER_ALWAYS_FALSE;
+	if (it == cache_entry->bitvectors.end()) {
+		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
+	}
+	return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 }
 
 unique_ptr<TableFilter> CacheExpressionFilter::Copy() const {

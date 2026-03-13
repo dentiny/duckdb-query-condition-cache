@@ -12,21 +12,15 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 namespace duckdb {
 
-namespace {
-// Thread-local: table_index -> cache entry to inject in the post-optimize pass.
-// Populated by PreOptimizeFunction, consumed and cleared by OptimizeFunction.
-thread_local unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> tl_cache_apply_pending;
-} // namespace
-
 QueryConditionCacheOptimizer::QueryConditionCacheOptimizer() {
 	pre_optimize_function = PreOptimizeFunction;
-	optimize_function = OptimizeFunction;
 }
 
 // ============================================================================
@@ -54,14 +48,7 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	if (!IsSettingEnabled(input.context)) {
 		return;
 	}
-	tl_cache_apply_pending.clear();
-	try {
-		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false);
-	} catch (...) {
-		// If anything goes wrong during pre-optimization, clear pending entries
-		// and let the query proceed without cache optimization
-		tl_cache_apply_pending.clear();
-	}
+	PreOptimizeWalk(input.context, plan, /*inside_dml=*/false);
 }
 
 void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
@@ -118,7 +105,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	}
 
 	if (entry) {
-		tl_cache_apply_pending[get.table_index] = std::move(entry);
+		InjectCacheExpression(filter, get, entry);
 	}
 }
 
@@ -171,67 +158,18 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 }
 
 // ============================================================================
-// Post-optimize: runs AFTER all built-in passes.
-// FilterPushdown has already split predicates; we don't care about the split
-// because the key was computed pre-pushdown. We just find the LogicalGet
-// nodes whose table_index was matched and inject the cache filter.
+// InjectCacheExpression: add __condition_cache_filter on ROW_ID
 // ============================================================================
 
-void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	if (tl_cache_apply_pending.empty()) {
-		return;
-	}
-	PostOptimizeWalk(plan);
-	tl_cache_apply_pending.clear();
-}
-
-void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> &plan) {
-	for (auto &child : plan->children) {
-		PostOptimizeWalk(child);
-	}
-
-	if (plan->type != LogicalOperatorType::LOGICAL_GET) {
-		return;
-	}
-
-	auto &get = plan->Cast<LogicalGet>();
-	auto it = tl_cache_apply_pending.find(get.table_index);
-	if (it == tl_cache_apply_pending.end()) {
-		return;
-	}
-
-	InjectCacheFilter(plan, it->second);
-	tl_cache_apply_pending.erase(it);
-}
-
-// ============================================================================
-// InjectCacheFilter: add __condition_cache_filter on ROW_ID
-// ============================================================================
-
-void QueryConditionCacheOptimizer::InjectCacheFilter(unique_ptr<LogicalOperator> &get_plan,
-                                                     const shared_ptr<ConditionCacheEntry> &entry) {
-	auto &get = get_plan->Cast<LogicalGet>();
-
-	ScalarFunction func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
-	                    LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn, ConditionCacheFilterBind, nullptr,
-	                    nullptr, ConditionCacheFilterInit);
-
-	auto bind_data = make_uniq<ConditionCacheFilterBindData>(entry);
-
-	vector<unique_ptr<Expression>> children;
-	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0));
-
-	auto func_expr = make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, func, std::move(children),
-	                                                    std::move(bind_data));
-
-	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
-	                             make_uniq<CacheExpressionFilter>(std::move(func_expr), entry));
-
+void QueryConditionCacheOptimizer::InjectCacheExpression(LogicalFilter &filter, LogicalGet &get,
+                                                         const shared_ptr<ConditionCacheEntry> &entry) {
 	// Ensure ROW_ID column is in the scan so the filter can access it
 	bool has_rowid = false;
-	for (auto &col : get.GetColumnIds()) {
-		if (col.IsRowIdColumn()) {
+	idx_t row_id_col_idx = 0;
+	for (idx_t i = 0; i < get.GetColumnIds().size(); ++i) {
+		if (get.GetColumnIds()[i].IsRowIdColumn()) {
 			has_rowid = true;
+			row_id_col_idx = i;
 			break;
 		}
 	}
@@ -242,7 +180,23 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(unique_ptr<LogicalOperator>
 			}
 		}
 		get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
+		row_id_col_idx = get.GetColumnIds().size() - 1;
 	}
+
+	ScalarFunction func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
+	                    LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn, ConditionCacheFilterBind, nullptr,
+	                    nullptr, ConditionCacheFilterInit);
+
+	auto bind_data = make_uniq<ConditionCacheFilterBindData>(entry);
+
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundColumnRefExpression>("rowid", LogicalType::BIGINT,
+	                                                       ColumnBinding(get.table_index, row_id_col_idx)));
+
+	auto func_expr = make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, func, std::move(children),
+	                                                    std::move(bind_data));
+
+	filter.expressions.push_back(std::move(func_expr));
 }
 
 } // namespace duckdb
