@@ -33,4 +33,23 @@ format-all: format
 	cmake-format -i CMakeLists.txt
 	cmake-format -i test/unittest/CMakeLists.txt
 
-PHONY: format-all test_release_all test_debug_all test_reldebug_all
+# Benchmark targets
+# Usage: make benchmark_tpch [SF=1] [REPEAT=3] [MEMORY_LIMIT=4GB]
+# Example: make benchmark_tpch SF=10 MEMORY_LIMIT=2GB
+SF ?= 1
+REPEAT ?= 3
+BENCHMARK_OUT ?= benchmark/results_sf$(SF).md
+MEMORY_LIMIT ?=
+
+BENCHMARK_MEMORY_FLAG = $(if $(MEMORY_LIMIT),--memory-limit $(MEMORY_LIMIT),)
+
+benchmark_tpch:
+	uv run benchmark/run_tpch_benchmark.py --sf $(SF) --repeat $(REPEAT) --out $(BENCHMARK_OUT) $(BENCHMARK_MEMORY_FLAG)
+
+benchmark_tpch_dashboard:
+	uv run benchmark/run_tpch_benchmark.py --sf $(SF) --repeat $(REPEAT) --out $(BENCHMARK_OUT) --no-tpch $(BENCHMARK_MEMORY_FLAG)
+
+benchmark_tpch_no_chart:
+	uv run benchmark/run_tpch_benchmark.py --sf $(SF) --repeat $(REPEAT) --out $(BENCHMARK_OUT) --no-chart $(BENCHMARK_MEMORY_FLAG)
+
+PHONY: format-all test_release_all test_debug_all test_reldebug_all benchmark_tpch benchmark_tpch_dashboard benchmark_tpch_no_chart
