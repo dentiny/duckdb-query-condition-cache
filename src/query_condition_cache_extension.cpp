@@ -25,10 +25,10 @@ void LoadInternal(ExtensionLoader &loader) {
 	                                 ConditionCacheFilterBind, nullptr, nullptr, ConditionCacheFilterInit);
 	loader.RegisterFunction(cache_filter_func);
 
-	// Register the enable_query_condition_cache setting (default: false)
+	// Register the use_query_condition_cache setting (default: false)
 	auto &db = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(db);
-	config.AddExtensionOption("enable_query_condition_cache", "Enable automatic query condition cache build and apply",
+	config.AddExtensionOption("use_query_condition_cache", "Enable automatic query condition cache build and apply",
 	                          LogicalType {LogicalTypeId::BOOLEAN}, Value::BOOLEAN(false));
 
 	// Register operator extension for serialization/deserialization support

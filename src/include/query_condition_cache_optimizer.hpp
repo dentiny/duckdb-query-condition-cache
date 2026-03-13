@@ -18,7 +18,7 @@ public:
 	static void OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
 private:
-	//! Check if enable_query_condition_cache setting is enabled
+	//! Check if use_query_condition_cache setting is enabled
 	static bool IsSettingEnabled(ClientContext &context);
 
 	//! Walk plan pre-pushdown: find LogicalFilter→LogicalGet, compute key, lookup/build cache
