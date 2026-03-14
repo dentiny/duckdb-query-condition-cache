@@ -35,7 +35,8 @@ private:
 	BuildCacheForPredicate(ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get);
 
 	//! Inject cache filter expression on a LogicalFilter using ROW_ID from the LogicalGet
-	static void InjectCacheExpression(LogicalGet &get, const CacheKey &key, const shared_ptr<ConditionCacheEntry> &entry);
+	static void InjectCacheExpression(LogicalGet &get, const CacheKey &key,
+	                                  const shared_ptr<ConditionCacheEntry> &entry);
 };
 
 } // namespace duckdb

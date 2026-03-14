@@ -189,8 +189,8 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 // InjectCacheExpression: add __condition_cache_filter on ROW_ID
 // ============================================================================
 
-void QueryConditionCacheOptimizer::InjectCacheExpression(LogicalGet &get,
-                                                         const CacheKey &key, const shared_ptr<ConditionCacheEntry> &entry) {
+void QueryConditionCacheOptimizer::InjectCacheExpression(LogicalGet &get, const CacheKey &key,
+                                                         const shared_ptr<ConditionCacheEntry> &entry) {
 	// Ensure ROW_ID column is in the scan so the filter can access it
 	bool has_rowid = false;
 	idx_t row_id_col_idx = 0;

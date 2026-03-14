@@ -78,7 +78,8 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 
 // --- CacheExpressionFilter: ExpressionFilter with row-group level pruning ---
 
-CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, CacheKey key, shared_ptr<ConditionCacheEntry> entry)
+CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, CacheKey key,
+                                             shared_ptr<ConditionCacheEntry> entry)
     : ExpressionFilter(std::move(expr_p)), cache_key(std::move(key)), cache_entry(std::move(entry)) {
 }
 
