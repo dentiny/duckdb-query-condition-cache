@@ -8,3 +8,6 @@ test/python/__pycache__/
 .Rhistory
 .vscode
 .claude
+.tmp/
+benchmark/tpch_sf*.duckdb*
+benchmark/clickbench.duckdb*
