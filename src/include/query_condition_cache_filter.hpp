@@ -35,12 +35,14 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 // ExpressionFilter subclass that overrides CheckStatistics for row-group level pruning
 class CacheExpressionFilter : public ExpressionFilter {
 public:
+	CacheKey cache_key;
 	shared_ptr<ConditionCacheEntry> cache_entry;
 
-	CacheExpressionFilter(unique_ptr<Expression> expr, shared_ptr<ConditionCacheEntry> entry);
+	CacheExpressionFilter(unique_ptr<Expression> expr, CacheKey key, shared_ptr<ConditionCacheEntry> entry);
 
 	FilterPropagateResult CheckStatistics(BaseStatistics &stats) const override;
 	unique_ptr<TableFilter> Copy() const override;
+	string ToString(const string &column_name) const override;
 };
 
 } // namespace duckdb

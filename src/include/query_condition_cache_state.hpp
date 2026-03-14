@@ -40,6 +40,10 @@ struct CacheKey {
 	bool operator==(const CacheKey &other) const {
 		return table_oid == other.table_oid && filter_key == other.filter_key;
 	}
+
+	string ToString() const {
+		return "CacheKey{table_oid=" + std::to_string(table_oid) + ", filter_key=" + filter_key + "}";
+	}
 };
 
 struct CacheKeyHashFunction {

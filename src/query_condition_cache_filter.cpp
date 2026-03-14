@@ -49,13 +49,17 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	auto &input_vec = args.data[0];
 	idx_t count = args.size();
 
-	// Get the first row_id to determine which vector we're in
-	UnifiedVectorFormat vdata;
-	input_vec.ToUnifiedFormat(count, vdata);
-	auto row_ids = UnifiedVectorFormat::GetData<int64_t>(vdata);
-
-	auto first_idx = vdata.sel->get_index(0);
-	int64_t first_row_id = row_ids[first_idx];
+	// Get the first row_id to determine which vector we're in.
+	// Fast path: most scans produce flat vectors — avoid ToUnifiedFormat overhead.
+	int64_t first_row_id;
+	if (input_vec.GetVectorType() == VectorType::FLAT_VECTOR) {
+		first_row_id = FlatVector::GetData<int64_t>(input_vec)[0];
+	} else {
+		UnifiedVectorFormat vdata;
+		input_vec.ToUnifiedFormat(count, vdata);
+		auto row_ids = UnifiedVectorFormat::GetData<int64_t>(vdata);
+		first_row_id = row_ids[vdata.sel->get_index(0)];
+	}
 
 	idx_t rg_idx = NumericCast<idx_t>(first_row_id) / DEFAULT_ROW_GROUP_SIZE;
 	idx_t vec_idx = (NumericCast<idx_t>(first_row_id) % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
@@ -74,8 +78,8 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 
 // --- CacheExpressionFilter: ExpressionFilter with row-group level pruning ---
 
-CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, shared_ptr<ConditionCacheEntry> entry)
-    : ExpressionFilter(std::move(expr_p)), cache_entry(std::move(entry)) {
+CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, CacheKey key, shared_ptr<ConditionCacheEntry> entry)
+    : ExpressionFilter(std::move(expr_p)), cache_key(std::move(key)), cache_entry(std::move(entry)) {
 }
 
 FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &stats) const {
@@ -95,7 +99,12 @@ FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &sta
 }
 
 unique_ptr<TableFilter> CacheExpressionFilter::Copy() const {
-	return make_uniq<CacheExpressionFilter>(expr->Copy(), cache_entry);
+	return make_uniq<CacheExpressionFilter>(expr->Copy(), cache_key, cache_entry);
+}
+
+string CacheExpressionFilter::ToString(const string &column_name) const {
+	string result = "Cache Filter (key=" + cache_key.ToString() + ")";
+	return result;
 }
 
 } // namespace duckdb
