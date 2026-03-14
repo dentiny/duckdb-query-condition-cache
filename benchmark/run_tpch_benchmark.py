@@ -105,7 +105,34 @@ def get_duckdb_connection(sf: int, args=None):
         cfg["threads"] = args.threads
     if args and args.memory_limit:
         cfg["memory_limit"] = args.memory_limit
-    con = duckdb.connect(config=cfg)
+
+    # Cache TPC-H data on disk to avoid regenerating it each run
+    db_path = WORKSPACE / "benchmark" / f"tpch_sf{sf}.duckdb"
+    regenerate = args.regenerate if args else False
+    if regenerate and db_path.exists():
+        db_path.unlink()
+        # Also remove WAL file if present
+        wal = db_path.with_suffix(".duckdb.wal")
+        if wal.exists():
+            wal.unlink()
+    needs_generate = not db_path.exists()
+
+    if needs_generate:
+        print(f"Generating TPC-H data (SF={sf}) into {db_path}...", flush=True)
+        gen_con = duckdb.connect(str(db_path), config={"allow_unsigned_extensions": True})
+        # Load extension in generator connection so tpch extension is available
+        if EXT_PATH.exists():
+            gen_con.execute(f"LOAD '{EXT_PATH}';")
+        else:
+            gen_con.execute("LOAD query_condition_cache;")
+        gen_con.execute("CALL dbgen(sf=%d);" % sf)
+        gen_con.execute("CHECKPOINT;")
+        gen_con.close()
+        print("Data generated and cached on disk.", flush=True)
+    else:
+        print(f"Reusing cached TPC-H data (SF={sf}) from {db_path}", flush=True)
+
+    con = duckdb.connect(str(db_path), config=cfg)
 
     # Load the locally-built extension if available, otherwise fall back to installed
     if EXT_PATH.exists():
@@ -115,10 +142,6 @@ def get_duckdb_connection(sf: int, args=None):
         print("Attempting to LOAD from installed extensions...")
         con.execute("LOAD query_condition_cache;")
 
-    # Generate TPC-H data (tpch extension is linked into the build)
-    print(f"Generating TPC-H data (SF={sf})...", flush=True)
-    con.execute("CALL dbgen(sf=%d);" % sf)
-    con.execute("CHECKPOINT;")
     print("Data ready.", flush=True)
 
     return con
@@ -296,6 +319,11 @@ def main():
         help="Skip dashboard queries, run standard TPC-H only",
     )
     parser.add_argument("--no-chart", action="store_true", help="Skip chart generation")
+    parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="Force regeneration of TPC-H data even if cached on disk",
+    )
     parser.add_argument(
         "--threads",
         type=int,
