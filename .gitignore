@@ -11,3 +11,4 @@ test/python/__pycache__/
 .tmp/
 benchmark/tpch_sf*.duckdb*
 benchmark/clickbench.duckdb*
+__pycache__/
