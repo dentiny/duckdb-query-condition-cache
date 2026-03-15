@@ -31,6 +31,7 @@ struct RowGroupFilter {
 	bool VectorHasRows(idx_t vector_index) const;
 	bool IsEmpty() const;
 	void MergeFrom(const RowGroupFilter &other);
+	bool IsFull() const;
 };
 
 // Composite key for cache lookup: (table_oid, filter_key)

@@ -36,6 +36,22 @@ void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
 		matching_vectors[i] |= other.matching_vectors[i];
 	}
 }
+bool RowGroupFilter::IsFull() const {
+	// Check if all VECTORS_PER_ROW_GROUP bits are set
+	for (idx_t i = 0; i < BITVECTOR_ARRAY_SIZE; i++) {
+		idx_t remaining = VECTORS_PER_ROW_GROUP - i * 64;
+		uint64_t expected;
+		if (remaining >= 64) {
+			expected = ~uint64_t(0);
+		} else {
+			expected = (1ULL << remaining) - 1;
+		}
+		if (matching_vectors[i] != expected) {
+			return false;
+		}
+	}
+	return true;
+}
 
 // ------- CONDITION_CACHE_ENTRY -------
 

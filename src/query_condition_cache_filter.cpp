@@ -90,11 +90,14 @@ FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &sta
 	auto min_val = NumericStats::GetMin<int64_t>(stats);
 	idx_t rg = NumericCast<idx_t>(min_val) / DEFAULT_ROW_GROUP_SIZE;
 	auto it = cache_entry->bitvectors.find(rg);
-	if (it != cache_entry->bitvectors.end() && it->second.IsEmpty()) {
-		return FilterPropagateResult::FILTER_ALWAYS_FALSE;
-	}
 	if (it == cache_entry->bitvectors.end()) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
+	}
+	if (it->second.IsEmpty()) {
+		return FilterPropagateResult::FILTER_ALWAYS_FALSE;
+	}
+	if (it->second.IsFull()) {
+		return FilterPropagateResult::FILTER_ALWAYS_TRUE;
 	}
 	return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 }

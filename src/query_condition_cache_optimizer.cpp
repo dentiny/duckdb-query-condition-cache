@@ -12,7 +12,10 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -75,6 +78,27 @@ void QueryConditionCacheOptimizer::CollectGets(unique_ptr<LogicalOperator> &plan
 	}
 }
 
+// Check if an expression will be natively pushed down by DuckDB's FilterPushdown optimizer,
+// meaning the condition cache provides no additional benefit.
+// Covers: col op constant, BETWEEN with constant bounds, IS NULL, IS NOT NULL.
+static bool IsTriviallyPushable(const Expression &expr) {
+	// Comparisons with a constant side: col op const, const op col
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
+		auto &comp = expr.Cast<BoundComparisonExpression>();
+		return comp.left->IsFoldable() || comp.right->IsFoldable();
+	}
+	// BETWEEN with constant bounds
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
+		auto &between = expr.Cast<BoundBetweenExpression>();
+		return between.lower->IsFoldable() && between.upper->IsFoldable();
+	}
+	// IS NULL / IS NOT NULL
+	if (expr.type == ExpressionType::OPERATOR_IS_NULL || expr.type == ExpressionType::OPERATOR_IS_NOT_NULL) {
+		return true;
+	}
+	return false;
+}
+
 void QueryConditionCacheOptimizer::ExtractBindings(Expression &expr, unordered_set<idx_t> &table_bindings) {
 	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
 		auto &colref = expr.Cast<BoundColumnRefExpression>();
@@ -111,6 +135,20 @@ void QueryConditionCacheOptimizer::ProcessFilters(ClientContext &context, unique
 			idx_t table_index = pair.first;
 			auto &expressions = pair.second;
 			auto get = gets[table_index];
+
+			// Skip cache processing if all predicates are trivially pushable by DuckDB's
+			// native FilterPushdown (comparisons with constants, BETWEEN, IS NULL/NOT NULL).
+			// The cache provides no benefit for these — DuckDB already handles them efficiently.
+			bool all_trivially_pushable = true;
+			for (auto &e : expressions) {
+				if (!IsTriviallyPushable(*e)) {
+					all_trivially_pushable = false;
+					break;
+				}
+			}
+			if (all_trivially_pushable) {
+				continue;
+			}
 
 			auto table = get->GetTable();
 			if (!table) {

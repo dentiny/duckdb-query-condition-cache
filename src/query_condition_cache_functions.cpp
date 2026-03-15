@@ -101,8 +101,8 @@ class CacheBuildTask : public BaseExecutorTask {
 public:
 	CacheBuildTask(TaskExecutor &executor, ClientContext &context, DataTable &storage, DuckTransaction &transaction,
 	               ParallelTableScanState &parallel_state, Expression &bound_expr,
-	               const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types,
-	               idx_t rowid_col_idx, ConditionCacheEntry &local_entry)
+	               const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types, idx_t rowid_col_idx,
+	               ConditionCacheEntry &local_entry)
 	    : BaseExecutorTask(executor), context(context), storage(storage), transaction(transaction),
 	      parallel_state(parallel_state), bound_expr(bound_expr), column_ids(column_ids), scan_types(scan_types),
 	      rowid_col_idx(rowid_col_idx), local_entry(local_entry) {
