@@ -5,7 +5,7 @@ ClickBench Benchmark Harness for QueryConditionCache extension.
 Measures query execution time with and without the condition cache, using the
 same protocol as run_tpch_benchmark.py.
 
-Per-query protocol (all runs in the same DuckDB session):
+Per-query protocol (fresh connection + OS cache drop per query):
   Run 1 – cache OFF, OS cold  : cold baseline (reference only)
   Run 2 – cache OFF, OS warm  : true baseline (warm OS, no condition cache)
   Run 3 – cache ON,  first run : cache build (first query with cache enabled)
@@ -18,7 +18,9 @@ Usage:
 """
 
 import argparse
+import platform
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -95,18 +97,23 @@ def load_queries() -> list[tuple[str, str]]:
     return queries
 
 
-def get_duckdb_connection(args):
+def drop_os_caches():
+    """Best-effort OS page cache drop. Requires sudo on macOS, root on Linux."""
     try:
-        import duckdb
-    except ImportError:
-        print("ERROR: duckdb Python package not found. Run via: uv run benchmark/run_clickbench_benchmark.py")
-        sys.exit(1)
+        if platform.system() == "Darwin":
+            subprocess.run(["sudo", "-n", "purge"], capture_output=True, timeout=10)
+        else:
+            subprocess.run(
+                ["sudo", "-n", "sh", "-c", "sync && echo 3 > /proc/sys/vm/drop_caches"],
+                capture_output=True, timeout=10,
+            )
+    except Exception:
+        pass  # best-effort; not fatal if unavailable
 
-    cfg: dict = {"allow_unsigned_extensions": True}
-    if args.threads:
-        cfg["threads"] = args.threads
-    if args.memory_limit:
-        cfg["memory_limit"] = args.memory_limit
+
+def ensure_clickbench_data(args):
+    """Download/load ClickBench data if not already cached. Returns db_path."""
+    import duckdb
 
     db_path = WORKSPACE / "benchmark" / "clickbench.duckdb"
     if args.regenerate and db_path.exists():
@@ -114,9 +121,8 @@ def get_duckdb_connection(args):
         wal = db_path.with_suffix(".duckdb.wal")
         if wal.exists():
             wal.unlink()
-    needs_generate = not db_path.exists()
 
-    if needs_generate:
+    if not db_path.exists():
         print(f"Loading ClickBench data into {db_path}...")
         print("This downloads ~15 GB of parquet data from the ClickHouse dataset. May take a while.", flush=True)
         gen_con = duckdb.connect(str(db_path), config={"allow_unsigned_extensions": True})
@@ -132,7 +138,6 @@ def get_duckdb_connection(args):
             print("Data loaded and cached on disk.", flush=True)
         except Exception:
             gen_con.close()
-            # Remove the partial/corrupt database so next run retries cleanly
             if db_path.exists():
                 db_path.unlink()
             wal = db_path.with_suffix(".duckdb.wal")
@@ -142,15 +147,24 @@ def get_duckdb_connection(args):
     else:
         print(f"Reusing cached ClickBench data from {db_path}", flush=True)
 
-    con = duckdb.connect(str(db_path), config=cfg)
+    return db_path
 
+
+def open_connection(db_path: Path, args):
+    """Open a fresh DuckDB connection with the extension loaded."""
+    import duckdb
+
+    cfg: dict = {"allow_unsigned_extensions": True}
+    if args.threads:
+        cfg["threads"] = args.threads
+    if args.memory_limit:
+        cfg["memory_limit"] = args.memory_limit
+
+    con = duckdb.connect(str(db_path), config=cfg)
     if EXT_PATH.exists():
         con.execute(f"LOAD '{EXT_PATH}';")
     else:
-        print(f"WARNING: Extension not found at {EXT_PATH}. Build with: GEN=ninja make")
         con.execute("LOAD query_condition_cache;")
-
-    print("Data ready.", flush=True)
     return con
 
 
@@ -241,11 +255,16 @@ def plot_results(results: list[dict], out_path: Path):
     ax.bar(x + bar_width / 2, cached_avgs, bar_width, yerr=cached_stds,
            capsize=3, label="Cached", color="#2196F3", edgecolor="white")
 
+    # Use log scale when range is too large for linear to be readable
+    all_vals = [v for v in baseline_avgs + cached_avgs if v > 0]
+    if all_vals and max(all_vals) / min(all_vals) > 50:
+        ax.set_yscale("log")
+
     # Annotate speedup above each pair
     for i, r in enumerate(results):
         top = max(baseline_avgs[i] + baseline_stds[i], cached_avgs[i] + cached_stds[i])
         if r["speedup"] >= 1.05:
-            ax.text(x[i], top * 1.02, f"{r['speedup']:.1f}x",
+            ax.text(x[i], top * 1.05, f"{r['speedup']:.1f}x",
                     ha="center", va="bottom", fontsize=7, fontweight="bold", color="#1565C0")
 
     ax.set_xticks(x)
@@ -310,7 +329,14 @@ def main():
             parts.append(args.experiment_name)
         out_file = str(WORKSPACE / "benchmark" / f"{'_'.join(parts)}.md")
 
-    con = get_duckdb_connection(args)
+    try:
+        import duckdb  # noqa: F401
+    except ImportError:
+        print("ERROR: duckdb Python package not found. Run via: uv run benchmark/run_clickbench_benchmark.py")
+        sys.exit(1)
+
+    db_path = ensure_clickbench_data(args)
+    print("Data ready.", flush=True)
 
     all_queries = load_queries()
 
@@ -324,7 +350,10 @@ def main():
     for label, sql in all_queries:
         print(f"  {label}...", end=" ", flush=True)
         try:
+            drop_os_caches()
+            con = open_connection(db_path, args)
             result = benchmark_query(con, label, sql, args.repeat)
+            con.close()
             results.append(result)
             print(
                 f"baseline={result['baseline_avg']:.0f}±{result['baseline_std']:.0f}ms  "
@@ -340,9 +369,9 @@ def main():
     lines = [
         "# QueryConditionCache Benchmark Results — ClickBench\n",
         f"**Settings:**{threads_note}{mem_note}\n",
-        f"**Methodology:** Each query runs {args.repeat + 2} times in one session.",
-        "Run 1 (cold OS, cache off) warms the OS page cache and DuckDB buffer pool.",
-        "Runs 2–N (warm OS, cache off) establish the true baseline.",
+        f"**Methodology:** Each query runs {args.repeat + 2} times with a fresh connection (buffer pool cleared) and OS page cache drop between queries.",
+        "Run 1 (cold) warms the OS page cache and DuckDB buffer pool.",
+        "Runs 2–N (warm, cache off) establish the true baseline.",
         "Cache is then enabled; first run builds the cache entry, subsequent runs measure cache hits.",
         "**Speedup = avg(warm OS+buffer, no cache) / avg(warm OS+buffer, cache hit)**\n",
     ]
@@ -360,8 +389,6 @@ def main():
     if not args.no_chart and results:
         chart_path = Path(out_file).with_suffix(".png")
         plot_results(results, chart_path)
-
-    con.close()
 
 
 if __name__ == "__main__":
