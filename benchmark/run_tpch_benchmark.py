@@ -5,7 +5,7 @@ TPC-H Benchmark Harness for QueryConditionCache extension.
 Measures query execution time with and without the condition cache, using a
 protocol that isolates cache benefit from OS page cache effects.
 
-Per-query protocol (all runs in the same DuckDB session):
+Per-query protocol (fresh connection + OS cache drop per query):
   Run 1 – cache OFF, OS cold  : cold baseline (reference only)
   Run 2 – cache OFF, OS warm  : true baseline (warm OS, no condition cache)
   Run 3 – cache ON,  OS warm  : cache build (first query with cache enabled)
@@ -13,7 +13,7 @@ Per-query protocol (all runs in the same DuckDB session):
 
   Speedup = Run 2 / Run 4
 
-Runs 2 and 4 are each repeated REPEAT times; the median is used.
+Runs 2 and 4 are each repeated REPEAT times; the average is used.
 
 Usage:
     python benchmark/run_tpch_benchmark.py [--sf SF] [--repeat N] [--out FILE]
@@ -24,7 +24,9 @@ Requirements:
 
 import argparse
 import os
+import platform
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -92,35 +94,35 @@ DASHBOARD_QUERIES = [
 ]
 
 
-def get_duckdb_connection(sf: int, args=None):
+def drop_os_caches():
+    """Best-effort OS page cache drop. Requires sudo on macOS, root on Linux."""
     try:
-        import duckdb
-    except ImportError:
-        print("ERROR: duckdb Python package not found. Run via: uv run benchmark/run_tpch_benchmark.py")
-        sys.exit(1)
+        if platform.system() == "Darwin":
+            subprocess.run(["sudo", "-n", "purge"], capture_output=True, timeout=10)
+        else:
+            subprocess.run(
+                ["sudo", "-n", "sh", "-c", "sync && echo 3 > /proc/sys/vm/drop_caches"],
+                capture_output=True, timeout=10,
+            )
+    except Exception:
+        pass  # best-effort; not fatal if unavailable
 
-    # allow_unsigned_extensions is needed to load the locally-built .duckdb_extension binary
-    cfg: dict = {"allow_unsigned_extensions": True}
-    if args and args.threads:
-        cfg["threads"] = args.threads
-    if args and args.memory_limit:
-        cfg["memory_limit"] = args.memory_limit
 
-    # Cache TPC-H data on disk to avoid regenerating it each run
+def ensure_tpch_data(sf: int, args=None):
+    """Generate TPC-H data if not already cached on disk. Returns db_path."""
+    import duckdb
+
     db_path = WORKSPACE / "benchmark" / f"tpch_sf{sf}.duckdb"
     regenerate = args.regenerate if args else False
     if regenerate and db_path.exists():
         db_path.unlink()
-        # Also remove WAL file if present
         wal = db_path.with_suffix(".duckdb.wal")
         if wal.exists():
             wal.unlink()
-    needs_generate = not db_path.exists()
 
-    if needs_generate:
+    if not db_path.exists():
         print(f"Generating TPC-H data (SF={sf}) into {db_path}...", flush=True)
         gen_con = duckdb.connect(str(db_path), config={"allow_unsigned_extensions": True})
-        # Load extension in generator connection so tpch extension is available
         if EXT_PATH.exists():
             gen_con.execute(f"LOAD '{EXT_PATH}';")
         else:
@@ -132,18 +134,24 @@ def get_duckdb_connection(sf: int, args=None):
     else:
         print(f"Reusing cached TPC-H data (SF={sf}) from {db_path}", flush=True)
 
-    con = duckdb.connect(str(db_path), config=cfg)
+    return db_path
 
-    # Load the locally-built extension if available, otherwise fall back to installed
+
+def open_connection(db_path: Path, args=None):
+    """Open a fresh DuckDB connection with the extension loaded."""
+    import duckdb
+
+    cfg: dict = {"allow_unsigned_extensions": True}
+    if args and args.threads:
+        cfg["threads"] = args.threads
+    if args and args.memory_limit:
+        cfg["memory_limit"] = args.memory_limit
+
+    con = duckdb.connect(str(db_path), config=cfg)
     if EXT_PATH.exists():
         con.execute(f"LOAD '{EXT_PATH}';")
     else:
-        print(f"WARNING: Extension not found at {EXT_PATH}. Build with: GEN=ninja make")
-        print("Attempting to LOAD from installed extensions...")
         con.execute("LOAD query_condition_cache;")
-
-    print("Data ready.", flush=True)
-
     return con
 
 
@@ -199,16 +207,23 @@ def benchmark_query(con, label: str, sql: str, repeat: int) -> dict:
     }
 
 
-def run_tpch_suite(con, repeat: int) -> list[dict]:
-    """Run all 22 TPC-H queries."""
+def run_tpch_suite(db_path: Path, args, repeat: int) -> list[dict]:
+    """Run all 22 TPC-H queries, reconnecting between each for isolation."""
     print("\nRunning TPC-H suite (22 queries)...", flush=True)
     results = []
 
+    # Fetch query list once
+    con = open_connection(db_path, args)
     rows = con.execute("SELECT query_nr, query FROM tpch_queries() ORDER BY query_nr;").fetchall()
+    con.close()
+
     for query_nr, query_sql in rows:
         label = f"Q{query_nr:02d}"
         print(f"  {label}...", end=" ", flush=True)
+        drop_os_caches()
+        con = open_connection(db_path, args)
         result = benchmark_query(con, label, query_sql.strip(), repeat)
+        con.close()
         results.append(result)
         print(
             f"baseline={result['baseline_avg']:.0f}±{result['baseline_std']:.0f}ms  "
@@ -218,15 +233,18 @@ def run_tpch_suite(con, repeat: int) -> list[dict]:
     return results
 
 
-def run_dashboard_suite(con, repeat: int) -> list[dict]:
-    """Run dashboard-style queries on lineitem."""
+def run_dashboard_suite(db_path: Path, args, repeat: int) -> list[dict]:
+    """Run dashboard-style queries on lineitem, reconnecting between each."""
     print("\nRunning dashboard query suite...", flush=True)
     results = []
 
     for label, sql in DASHBOARD_QUERIES:
         short = label.split(":")[0]
         print(f"  {short}...", end=" ", flush=True)
+        drop_os_caches()
+        con = open_connection(db_path, args)
         result = benchmark_query(con, label, sql, repeat)
+        con.close()
         results.append(result)
         print(
             f"baseline={result['baseline_avg']:.0f}±{result['baseline_std']:.0f}ms  "
@@ -286,11 +304,16 @@ def plot_results(tpch_results: list[dict], dash_results: list[dict], sf: int, ou
         ax.bar(x + bar_width / 2, cached_avgs, bar_width, yerr=cached_stds,
                capsize=3, label="Cached", color="#2196F3", edgecolor="white")
 
+        # Use log scale when range is too large for linear to be readable
+        all_vals = [v for v in baseline_avgs + cached_avgs if v > 0]
+        if all_vals and max(all_vals) / min(all_vals) > 50:
+            ax.set_yscale("log")
+
         # Annotate speedup above each pair
         for i, r in enumerate(results):
             top = max(baseline_avgs[i] + baseline_stds[i], cached_avgs[i] + cached_stds[i])
             if r["speedup"] >= 1.05:
-                ax.text(x[i], top * 1.02, f"{r['speedup']:.1f}x",
+                ax.text(x[i], top * 1.05, f"{r['speedup']:.1f}x",
                         ha="center", va="bottom", fontsize=7, fontweight="bold", color="#1565C0")
 
         ax.set_xticks(x)
@@ -372,16 +395,23 @@ def main():
             parts.append(args.experiment_name)
         out_file = str(WORKSPACE / "benchmark" / f"{'_'.join(parts)}.md")
 
-    con = get_duckdb_connection(args.sf, args)
+    try:
+        import duckdb  # noqa: F401
+    except ImportError:
+        print("ERROR: duckdb Python package not found. Run via: uv run benchmark/run_tpch_benchmark.py")
+        sys.exit(1)
+
+    db_path = ensure_tpch_data(args.sf, args)
+    print("Data ready.", flush=True)
 
     tpch_results = []
     dash_results = []
 
     if not args.no_tpch:
-        tpch_results = run_tpch_suite(con, args.repeat)
+        tpch_results = run_tpch_suite(db_path, args, args.repeat)
 
     if not args.no_dashboard:
-        dash_results = run_dashboard_suite(con, args.repeat)
+        dash_results = run_dashboard_suite(db_path, args, args.repeat)
 
     mem_note = f", memory_limit={args.memory_limit}" if args.memory_limit else ""
     threads_note = f", threads={args.threads}" if args.threads else ""
@@ -390,9 +420,9 @@ def main():
     lines = [
         f"# QueryConditionCache Benchmark Results — TPC-H SF={args.sf}\n",
         f"**Settings:** SF={args.sf}{threads_note}{mem_note}\n",
-        f"**Methodology:** Each query runs {args.repeat + 2} times in one session.",
-        "Run 1 (cold OS, cache off) warms the OS page cache and DuckDB buffer pool.",
-        "Runs 2–N (warm OS, cache off) establish the true baseline — warm buffer pool, no condition cache.",
+        f"**Methodology:** Each query runs {args.repeat + 2} times with a fresh connection (buffer pool cleared) and OS page cache drop between queries.",
+        "Run 1 (cold) warms the OS page cache and DuckDB buffer pool.",
+        "Runs 2–N (warm, cache off) establish the true baseline.",
         "Cache is then enabled; first run builds the cache entry, subsequent runs measure cache hits.",
         "**Speedup = avg(warm OS+buffer, no cache) / avg(warm OS+buffer, cache hit)**",
         "",
@@ -419,8 +449,6 @@ def main():
     if not args.no_chart:
         chart_path = Path(out_file).with_suffix(".png")
         plot_results(tpch_results, dash_results, args.sf, chart_path)
-
-    con.close()
 
 
 if __name__ == "__main__":
