@@ -18,7 +18,6 @@ Usage:
 """
 
 import argparse
-import os
 import statistics
 import sys
 import time
@@ -179,33 +178,39 @@ def benchmark_query(con, label: str, sql: str, repeat: int) -> dict:
 
     con.execute("SET use_query_condition_cache = false;")
 
-    baseline = statistics.median(t_warm_no_cache)
-    cache_hit = statistics.median(t_cache_hit)
-    speedup = baseline / cache_hit if cache_hit > 0 else float("inf")
+    baseline_avg = statistics.mean(t_warm_no_cache)
+    baseline_std = statistics.stdev(t_warm_no_cache) if len(t_warm_no_cache) > 1 else 0.0
+    cache_hit_avg = statistics.mean(t_cache_hit)
+    cache_hit_std = statistics.stdev(t_cache_hit) if len(t_cache_hit) > 1 else 0.0
+    speedup = baseline_avg / cache_hit_avg if cache_hit_avg > 0 else float("inf")
 
     return {
         "label": label,
         "cold_ms": t_cold,
-        "baseline_ms": baseline,
+        "baseline_avg": baseline_avg,
+        "baseline_std": baseline_std,
+        "baseline_runs": t_warm_no_cache,
         "build_ms": t_build,
-        "cache_hit_ms": cache_hit,
+        "cache_hit_avg": cache_hit_avg,
+        "cache_hit_std": cache_hit_std,
+        "cache_hit_runs": t_cache_hit,
         "speedup": speedup,
     }
 
 
 def format_table(title: str, results: list[dict], repeat: int) -> str:
     lines = [
-        f"## {title} (median of {repeat} warm runs)\n",
-        "| Query | Cold OS (ms) | Warm OS, no cache (ms) | Cache Build (ms) | Cache Hit (ms) | Speedup |",
-        "|-------|--------------|------------------------|------------------|----------------|---------|",
+        f"## {title} (avg±std of {repeat} warm runs)\n",
+        "| Query | Cold (ms) | Baseline avg±std (ms) | Cache Build (ms) | Cache Hit avg±std (ms) | Speedup |",
+        "|-------|-----------|-----------------------|------------------|------------------------|---------|",
     ]
     for r in results:
         lines.append(
             f"| {r['label']:<5} "
-            f"| {r['cold_ms']:>12.0f} "
-            f"| {r['baseline_ms']:>22.0f} "
+            f"| {r['cold_ms']:>9.0f} "
+            f"| {r['baseline_avg']:>10.0f} ± {r['baseline_std']:<8.0f} "
             f"| {r['build_ms']:>16.0f} "
-            f"| {r['cache_hit_ms']:>14.0f} "
+            f"| {r['cache_hit_avg']:>11.0f} ± {r['cache_hit_std']:<8.0f} "
             f"| {r['speedup']:>6.2f}x |"
         )
     lines.append("")
@@ -220,33 +225,34 @@ def plot_results(results: list[dict], out_path: Path):
         print("matplotlib/numpy not available, skipping chart generation.")
         return
 
-    fig, ax = plt.subplots(figsize=(16, 6))
-    fig.suptitle("QueryConditionCache Speedup — ClickBench", fontsize=14, fontweight="bold")
+    fig, ax = plt.subplots(figsize=(18, 7))
+    fig.suptitle("QueryConditionCache — ClickBench (avg ± std)", fontsize=14, fontweight="bold")
 
     labels = [r["label"] for r in results]
-    speedups = [r["speedup"] for r in results]
-    colors = ["#2196F3" if s >= 1.05 else "#9E9E9E" for s in speedups]
+    baseline_avgs = [r["baseline_avg"] for r in results]
+    baseline_stds = [r["baseline_std"] for r in results]
+    cached_avgs = [r["cache_hit_avg"] for r in results]
+    cached_stds = [r["cache_hit_std"] for r in results]
 
+    bar_width = 0.35
     x = np.arange(len(labels))
-    bars = ax.bar(x, speedups, color=colors)
-    ax.axhline(y=1.0, color="red", linestyle="--", linewidth=1, alpha=0.7, label="baseline (1x)")
+    ax.bar(x - bar_width / 2, baseline_avgs, bar_width, yerr=baseline_stds,
+           capsize=3, label="Baseline (no cache)", color="#9E9E9E", edgecolor="white")
+    ax.bar(x + bar_width / 2, cached_avgs, bar_width, yerr=cached_stds,
+           capsize=3, label="Cached", color="#2196F3", edgecolor="white")
+
+    # Annotate speedup above each pair
+    for i, r in enumerate(results):
+        top = max(baseline_avgs[i] + baseline_stds[i], cached_avgs[i] + cached_stds[i])
+        if r["speedup"] >= 1.05:
+            ax.text(x[i], top * 1.02, f"{r['speedup']:.1f}x",
+                    ha="center", va="bottom", fontsize=7, fontweight="bold", color="#1565C0")
+
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Speedup (higher is better)")
+    ax.set_ylabel("Time (ms)")
     ax.set_title("ClickBench Queries (Q00–Q42)")
-    ax.legend()
-
-    for bar, speed in zip(bars, speedups):
-        if speed >= 1.05:
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.05,
-                f"{speed:.1f}x",
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                fontweight="bold",
-            )
+    ax.legend(fontsize=8)
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -281,9 +287,28 @@ def main():
         "--memory-limit", type=str, default=None,
         help="DuckDB memory limit (e.g. '4GB')",
     )
+    parser.add_argument(
+        "--experiment-name", type=str, default=None,
+        help="Name prefix for output files (e.g. 'baseline_v2'). "
+        "Default auto-generates from arguments.",
+    )
     args = parser.parse_args()
 
-    out_file = args.out or str(WORKSPACE / "benchmark" / "results_clickbench.md")
+    # Build a descriptive default filename from arguments
+    if args.out:
+        out_file = args.out
+    else:
+        parts = ["clickbench"]
+        if args.threads:
+            parts.append(f"t{args.threads}")
+        if args.memory_limit:
+            parts.append(f"mem{args.memory_limit.replace(' ', '')}")
+        parts.append(f"r{args.repeat}")
+        if args.queries:
+            parts.append(f"q{args.queries.replace(',', '-')}")
+        if args.experiment_name:
+            parts.append(args.experiment_name)
+        out_file = str(WORKSPACE / "benchmark" / f"{'_'.join(parts)}.md")
 
     con = get_duckdb_connection(args)
 
@@ -302,7 +327,8 @@ def main():
             result = benchmark_query(con, label, sql, args.repeat)
             results.append(result)
             print(
-                f"baseline={result['baseline_ms']:.0f}ms  hit={result['cache_hit_ms']:.0f}ms  {result['speedup']:.2f}x",
+                f"baseline={result['baseline_avg']:.0f}±{result['baseline_std']:.0f}ms  "
+                f"hit={result['cache_hit_avg']:.0f}±{result['cache_hit_std']:.0f}ms  {result['speedup']:.2f}x",
                 flush=True,
             )
         except Exception as e:
@@ -318,7 +344,7 @@ def main():
         "Run 1 (cold OS, cache off) warms the OS page cache and DuckDB buffer pool.",
         "Runs 2–N (warm OS, cache off) establish the true baseline.",
         "Cache is then enabled; first run builds the cache entry, subsequent runs measure cache hits.",
-        "**Speedup = median(warm OS+buffer, no cache) / median(warm OS+buffer, cache hit)**\n",
+        "**Speedup = avg(warm OS+buffer, no cache) / avg(warm OS+buffer, cache hit)**\n",
     ]
 
     if results:
