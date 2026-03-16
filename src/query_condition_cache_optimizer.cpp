@@ -12,17 +12,15 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 namespace duckdb {
 
-namespace {
-// Thread-local: table_index -> cache entry to inject in the post-optimize pass.
-// Populated by PreOptimizeFunction, consumed and cleared by OptimizeFunction.
-thread_local unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> tl_cache_apply_pending;
-} // namespace
+thread_local unordered_map<idx_t, pair<CacheKey, shared_ptr<ConditionCacheEntry>>> tl_cache_apply_pending;
 
 QueryConditionCacheOptimizer::QueryConditionCacheOptimizer() {
 	pre_optimize_function = PreOptimizeFunction;
@@ -55,73 +53,90 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 		return;
 	}
 	tl_cache_apply_pending.clear();
-	try {
-		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false);
-	} catch (...) {
-		// If anything goes wrong during pre-optimization, clear pending entries
-		// and let the query proceed without cache optimization
-		tl_cache_apply_pending.clear();
-	}
+	unordered_map<idx_t, LogicalGet *> gets;
+	CollectGets(plan, gets, false);
+	ProcessFilters(input.context, plan, gets, false);
 }
 
-void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
-                                                   bool inside_dml) {
-	// Check if this node is a DML operator — skip cache building in DML subplans
+void QueryConditionCacheOptimizer::CollectGets(unique_ptr<LogicalOperator> &plan,
+                                               unordered_map<idx_t, LogicalGet *> &gets, bool inside_dml) {
 	bool is_dml =
 	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
 	    plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_MERGE_INTO;
 	bool child_inside_dml = inside_dml || is_dml;
 
+	if (plan->type == LogicalOperatorType::LOGICAL_GET && !inside_dml) {
+		auto &get = plan->Cast<LogicalGet>();
+		gets[get.table_index] = &get;
+	}
+
 	for (auto &child : plan->children) {
-		PreOptimizeWalk(context, child, child_inside_dml);
-	}
-
-	if (inside_dml) {
-		return; // Don't build caches for predicates inside DML subplans
-	}
-
-	if (plan->type != LogicalOperatorType::LOGICAL_FILTER || plan->children.empty()) {
-		return;
-	}
-	if (plan->children[0]->type != LogicalOperatorType::LOGICAL_GET) {
-		return;
-	}
-
-	auto &filter = plan->Cast<LogicalFilter>();
-	auto &get = plan->children[0]->Cast<LogicalGet>();
-	auto table = get.GetTable();
-	if (!table) {
-		return; // Not a DuckDB table (e.g. system table, external), skip gracefully
-	}
-	if (filter.expressions.empty()) {
-		return;
-	}
-
-	auto &duck_table = table->Cast<DuckTableEntry>();
-	auto &storage = duck_table.GetStorage();
-
-	// Skip caching for tables with indexes — index scans are typically more efficient
-	if (storage.HasIndexes()) {
-		return;
-	}
-
-	auto key = ComputePredicateKey(table->oid, filter.expressions);
-	auto store = ConditionCacheStore::GetOrCreate(context);
-	auto entry = store->Lookup(context, key);
-
-	if (!entry) {
-		// Cache miss: build cache inline.
-		entry = BuildCacheForPredicate(context, filter.expressions, get);
-		if (entry) {
-			store->Upsert(context, key, entry);
-		}
-	}
-
-	if (entry) {
-		tl_cache_apply_pending[get.table_index] = std::move(entry);
+		CollectGets(child, gets, child_inside_dml);
 	}
 }
 
+void QueryConditionCacheOptimizer::ExtractBindings(Expression &expr, unordered_set<idx_t> &table_bindings) {
+	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &colref = expr.Cast<BoundColumnRefExpression>();
+		table_bindings.insert(colref.binding.table_index);
+	}
+	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { ExtractBindings(child, table_bindings); });
+}
+
+void QueryConditionCacheOptimizer::ProcessFilters(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                                  unordered_map<idx_t, LogicalGet *> &gets, bool inside_dml) {
+	bool is_dml =
+	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
+	    plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_MERGE_INTO;
+	bool child_inside_dml = inside_dml || is_dml;
+
+	if (!inside_dml && plan->type == LogicalOperatorType::LOGICAL_FILTER) {
+		auto &filter = plan->Cast<LogicalFilter>();
+		unordered_map<idx_t, vector<unique_ptr<Expression>>> table_expressions;
+
+		for (auto &expr : filter.expressions) {
+			unordered_set<idx_t> table_bindings;
+			ExtractBindings(*expr, table_bindings);
+
+			// Only process expressions that belong to exactly one table
+			if (table_bindings.size() == 1) {
+				idx_t table_index = *table_bindings.begin();
+				if (gets.find(table_index) != gets.end()) {
+					table_expressions[table_index].push_back(expr->Copy());
+				}
+			}
+		}
+
+		for (auto &pair : table_expressions) {
+			idx_t table_index = pair.first;
+			auto &expressions = pair.second;
+			auto get = gets[table_index];
+
+			auto table = get->GetTable();
+			if (!table) {
+				continue;
+			}
+
+			auto key = ComputePredicateKey(table->oid, expressions);
+			auto store = ConditionCacheStore::GetOrCreate(context);
+			auto entry = store->Lookup(context, key);
+
+			if (!entry) {
+				entry = BuildCacheForPredicate(context, expressions, *get);
+				if (entry) {
+					store->Upsert(context, key, entry);
+				}
+			}
+			if (entry) {
+				tl_cache_apply_pending[table_index] = make_pair(key, entry);
+			}
+		}
+	}
+
+	for (auto &child : plan->children) {
+		ProcessFilters(context, child, gets, child_inside_dml);
+	}
+}
 CacheKey QueryConditionCacheOptimizer::ComputePredicateKey(idx_t table_oid,
                                                            const vector<unique_ptr<Expression>> &expressions) {
 	vector<string> parts;
@@ -171,11 +186,46 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 }
 
 // ============================================================================
-// Post-optimize: runs AFTER all built-in passes.
-// FilterPushdown has already split predicates; we don't care about the split
-// because the key was computed pre-pushdown. We just find the LogicalGet
-// nodes whose table_index was matched and inject the cache filter.
+// InjectCacheExpression: add __condition_cache_filter on ROW_ID
 // ============================================================================
+
+void QueryConditionCacheOptimizer::InjectCacheExpression(LogicalGet &get, const CacheKey &key,
+                                                         const shared_ptr<ConditionCacheEntry> &entry) {
+	// Ensure ROW_ID column is in the scan so the filter can access it
+	bool has_rowid = false;
+	idx_t row_id_col_idx = 0;
+	for (idx_t i = 0; i < get.GetColumnIds().size(); ++i) {
+		if (get.GetColumnIds()[i].IsRowIdColumn()) {
+			has_rowid = true;
+			row_id_col_idx = i;
+			break;
+		}
+	}
+	if (!has_rowid) {
+		if (get.projection_ids.empty()) {
+			for (idx_t i = 0; i < get.GetColumnIds().size(); ++i) {
+				get.projection_ids.push_back(i);
+			}
+		}
+		get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
+		row_id_col_idx = get.GetColumnIds().size() - 1;
+	}
+
+	ScalarFunction func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
+	                    LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn, ConditionCacheFilterBind, nullptr,
+	                    nullptr, ConditionCacheFilterInit);
+
+	auto bind_data = make_uniq<ConditionCacheFilterBindData>(entry);
+
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType::BIGINT, 0));
+
+	auto func_expr = make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, func, std::move(children),
+	                                                    std::move(bind_data));
+
+	auto cache_filter = make_uniq<CacheExpressionFilter>(std::move(func_expr), key, entry);
+	get.table_filters.PushFilter(get.GetColumnIds()[row_id_col_idx], std::move(cache_filter));
+}
 
 void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	if (tl_cache_apply_pending.empty()) {
@@ -200,49 +250,8 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> 
 		return;
 	}
 
-	InjectCacheFilter(plan, it->second);
+	InjectCacheExpression(get, it->second.first, it->second.second);
 	tl_cache_apply_pending.erase(it);
-}
-
-// ============================================================================
-// InjectCacheFilter: add __condition_cache_filter on ROW_ID
-// ============================================================================
-
-void QueryConditionCacheOptimizer::InjectCacheFilter(unique_ptr<LogicalOperator> &get_plan,
-                                                     const shared_ptr<ConditionCacheEntry> &entry) {
-	auto &get = get_plan->Cast<LogicalGet>();
-
-	ScalarFunction func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
-	                    LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn, ConditionCacheFilterBind, nullptr,
-	                    nullptr, ConditionCacheFilterInit);
-
-	auto bind_data = make_uniq<ConditionCacheFilterBindData>(entry);
-
-	vector<unique_ptr<Expression>> children;
-	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0));
-
-	auto func_expr = make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, func, std::move(children),
-	                                                    std::move(bind_data));
-
-	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
-	                             make_uniq<CacheExpressionFilter>(std::move(func_expr), entry));
-
-	// Ensure ROW_ID column is in the scan so the filter can access it
-	bool has_rowid = false;
-	for (auto &col : get.GetColumnIds()) {
-		if (col.IsRowIdColumn()) {
-			has_rowid = true;
-			break;
-		}
-	}
-	if (!has_rowid) {
-		if (get.projection_ids.empty()) {
-			for (idx_t i = 0; i < get.GetColumnIds().size(); ++i) {
-				get.projection_ids.push_back(i);
-			}
-		}
-		get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
-	}
 }
 
 } // namespace duckdb

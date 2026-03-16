@@ -17,7 +17,7 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 
 	// Create a dummy expression for the filter (won't be evaluated in stats check)
 	auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
-	CacheExpressionFilter filter(std::move(dummy_expr), entry);
+	CacheExpressionFilter filter(std::move(dummy_expr), CacheKey {0, "val > 5"}, entry);
 
 	SECTION("row group with qualifying vectors: no pruning") {
 		// Stats covering row group 0 (row_ids 0..122879)
