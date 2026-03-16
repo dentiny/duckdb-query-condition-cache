@@ -15,10 +15,10 @@ public:
 	static void PreOptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 	static void OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
+private:
 	//! Check if use_query_condition_cache setting is enabled
 	static bool IsSettingEnabled(ClientContext &context);
 
-private:
 	//! Walk plan pre-pushdown: find LogicalFilter→LogicalGet, compute key, lookup/build cache
 	static void CollectGets(unique_ptr<LogicalOperator> &plan, unordered_map<idx_t, LogicalGet *> &gets,
 	                        bool inside_dml);
