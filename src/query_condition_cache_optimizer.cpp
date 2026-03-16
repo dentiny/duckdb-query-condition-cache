@@ -15,6 +15,8 @@
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
@@ -80,7 +82,7 @@ void QueryConditionCacheOptimizer::CollectGets(unique_ptr<LogicalOperator> &plan
 
 // Check if an expression will be natively pushed down by DuckDB's FilterPushdown optimizer,
 // meaning the condition cache provides no additional benefit.
-// Covers: col op constant, BETWEEN with constant bounds, IS NULL, IS NOT NULL.
+// Mirrors the logic in FilterCombiner::AddFilter + TryPushdownExpression.
 static bool IsTriviallyPushable(const Expression &expr) {
 	// Comparisons with a constant side: col op const, const op col
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
@@ -95,6 +97,50 @@ static bool IsTriviallyPushable(const Expression &expr) {
 	// IS NULL / IS NOT NULL
 	if (expr.type == ExpressionType::OPERATOR_IS_NULL || expr.type == ExpressionType::OPERATOR_IS_NOT_NULL) {
 		return true;
+	}
+	// IN with constant children: col IN (const, const, ...)
+	if (expr.type == ExpressionType::COMPARE_IN && expr.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
+		auto &op = expr.Cast<BoundOperatorExpression>();
+		if (op.children.size() > 1 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+			bool all_const = true;
+			for (idx_t i = 1; i < op.children.size(); i++) {
+				if (op.children[i]->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+					all_const = false;
+					break;
+				}
+			}
+			return all_const;
+		}
+	}
+	// LIKE with constant pattern: col LIKE 'literal' (function name "~~")
+	// prefix(col, 'literal')
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		if ((func.function.name == "~~" || func.function.name == "prefix") && func.children.size() == 2 &&
+		    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+		    func.children[1]->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+			return true;
+		}
+	}
+	// OR of simple comparisons: col = 1 OR col = 2 OR ...
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		auto &conj = expr.Cast<BoundConjunctionExpression>();
+		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+			for (auto &child : conj.children) {
+				if (child->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+					return false;
+				}
+				auto &comp = child->Cast<BoundComparisonExpression>();
+				bool has_col_and_const = (comp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				                          comp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) ||
+				                         (comp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+				                          comp.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF);
+				if (!has_col_and_const) {
+					return false;
+				}
+			}
+			return !conj.children.empty();
+		}
 	}
 	return false;
 }
