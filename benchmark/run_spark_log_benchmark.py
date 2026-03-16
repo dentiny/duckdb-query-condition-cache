@@ -5,9 +5,12 @@ Spark Log Analytics Benchmark Harness for QueryConditionCache extension.
 Downloads the full Spark log dataset from Zenodo (loghub-2.0), loads it into
 DuckDB, and benchmarks three real-world observability stories:
 
-  Story 1 – Multi-Widget Dashboard:  4 queries sharing Content LIKE '%memory%'
-  Story 2 – SRE Interactive Drill-Down: iterative refinement with LIKE filters on broadcast/memory
-  Story 3 – Pattern Matching:  SecurityManager log analysis with LIKE filters
+  Story 1 – Incident Investigation Dashboard: 5 queries sharing a multi-pattern
+             ILIKE error filter (exception/killed/failed/error/timeout)
+  Story 2 – Log Search & Triage: broad OR-LIKE search across infrastructure
+             patterns (container/executor/shuffle/heartbeat/retry/exception)
+  Story 3 – Anomaly Detection: case-insensitive multi-keyword search with
+             ILIKE across 10 operational patterns
 
 Per-query protocol (fresh connection + OS cache drop per query):
   Run 1 – cache OFF, OS cold  : cold baseline (reference only)
@@ -59,55 +62,118 @@ SPARK_DB_PATH = WORKSPACE / "benchmark" / "spark_logs.duckdb"
 # Story definitions
 # ---------------------------------------------------------------------------
 
+# Note on predicate design:
+# - Single LIKE is "trivially pushable" — the cache optimizer skips it (DuckDB
+#   handles it natively via zone maps).
+# - OR of multiple LIKEs and ILIKE are NOT trivially pushable — these benefit
+#   from the condition cache because DuckDB cannot push them to storage.
+# - Selectivity matters: predicates matching fewer row groups let the cache
+#   skip more data. Error patterns match ~57/131 row groups (56% skip rate).
+
+# Shared predicate fragments (used across multiple stories)
+_ERROR_ILIKE = (
+    "Content ILIKE '%exception%' OR Content ILIKE '%killed%'"
+    " OR Content ILIKE '%failed%' OR Content ILIKE '%error%'"
+    " OR Content ILIKE '%timeout%'"
+)
+
+_INFRA_OR_LIKE = (
+    "Content LIKE '%Container%' OR Content LIKE '%executor%'"
+    " OR Content LIKE '%shuffle%' OR Content LIKE '%heartbeat%'"
+    " OR Content LIKE '%retry%' OR Content LIKE '%Exception%'"
+)
+
+_ANOMALY_ILIKE = (
+    "Content ILIKE '%container%' OR Content ILIKE '%executor%'"
+    " OR Content ILIKE '%shuffle%' OR Content ILIKE '%heartbeat%'"
+    " OR Content ILIKE '%retry%' OR Content ILIKE '%exception%'"
+    " OR Content ILIKE '%killed%' OR Content ILIKE '%failed%'"
+    " OR Content ILIKE '%error%' OR Content ILIKE '%timeout%'"
+)
+
+# Story 1: SRE Incident Investigation Dashboard
+# Scenario: An alert fires. The SRE opens a dashboard that runs 5 widgets
+# simultaneously, all filtering for error/exception patterns using ILIKE
+# (case-insensitive). The cache builds on the first widget and accelerates
+# the remaining four.
 STORY_1_QUERIES = [
     (
-        "S1-W1: Memory Event Count",
-        "SELECT COUNT(*) FROM logs WHERE Content LIKE '%memory%';",
+        "S1-W1: Error Count",
+        f"SELECT COUNT(*) FROM logs WHERE {_ERROR_ILIKE};",
     ),
     (
-        "S1-W2: Memory Event Templates",
-        "SELECT EventTemplate, COUNT(*) FROM logs WHERE Content LIKE '%memory%' GROUP BY EventTemplate;",
+        "S1-W2: Errors by Template",
+        f"SELECT EventTemplate, COUNT(*) FROM logs WHERE {_ERROR_ILIKE} GROUP BY 1 ORDER BY 2 DESC;",
     ),
     (
-        "S1-W3: Memory Event IDs",
-        "SELECT EventId, COUNT(*) FROM logs WHERE Content LIKE '%memory%' GROUP BY EventId ORDER BY 2 DESC;",
+        "S1-W3: Error Event Distribution",
+        f"SELECT EventId, COUNT(*) FROM logs WHERE {_ERROR_ILIKE} GROUP BY 1 ORDER BY 2 DESC;",
     ),
     (
-        "S1-W4: Memory + TID",
-        "SELECT EventId, COUNT(*) FROM logs WHERE Content LIKE '%memory%' AND Content LIKE '%TID%' GROUP BY EventId;",
+        "S1-W4: Error Content Length",
+        f"SELECT LENGTH(Content)/100*100 AS bucket, COUNT(*) FROM logs WHERE {_ERROR_ILIKE} GROUP BY 1 ORDER BY 1;",
+    ),
+    (
+        "S1-W5: Error Content Stats",
+        f"SELECT SUM(LENGTH(Content)), AVG(LENGTH(Content)), COUNT(DISTINCT EventId) FROM logs WHERE {_ERROR_ILIKE};",
     ),
 ]
 
+# Story 2: Log Search & Triage
+# Scenario: An engineer searches logs for infrastructure-related keywords
+# using OR-LIKE across 6 patterns. The cache builds on the initial broad
+# search and speeds up subsequent refinement queries.
 STORY_2_QUERIES = [
     (
-        "S2-Q1: Broadcast events",
-        "SELECT Content FROM logs WHERE Content LIKE '%broadcast%';",
+        "S2-Q1: Infra Event Count",
+        f"SELECT COUNT(*) FROM logs WHERE {_INFRA_OR_LIKE};",
     ),
     (
-        "S2-Q2: Broadcast + memory",
-        "SELECT Content FROM logs WHERE Content LIKE '%broadcast%' AND Content LIKE '%memory%';",
+        "S2-Q2: Infra by Template",
+        f"SELECT EventTemplate, COUNT(*) FROM logs WHERE {_INFRA_OR_LIKE} GROUP BY 1 ORDER BY 2 DESC;",
     ),
     (
-        "S2-Q3: Broadcast + memory templates",
-        "SELECT EventTemplate, COUNT(*) FROM logs WHERE Content LIKE '%broadcast%' AND Content LIKE '%memory%' GROUP BY EventTemplate ORDER BY 2 DESC;",
+        "S2-Q3: Infra by EventId",
+        f"SELECT EventId, COUNT(*) FROM logs WHERE {_INFRA_OR_LIKE} GROUP BY 1 ORDER BY 2 DESC LIMIT 20;",
+    ),
+    (
+        "S2-Q4: Infra Content Stats",
+        f"SELECT SUM(LENGTH(Content)), AVG(LENGTH(Content)), COUNT(DISTINCT EventTemplate) FROM logs WHERE {_INFRA_OR_LIKE};",
     ),
 ]
 
+# Story 3: Anomaly Detection Sweep
+# Scenario: A monitoring job runs a broad case-insensitive scan across 10
+# operational keywords (ILIKE). This is the most expensive predicate and
+# benefits most from the cache, which eliminates redundant full-table
+# scans for each dashboard widget.
 STORY_3_QUERIES = [
     (
-        "S3-W1: SecurityManager acls",
-        "SELECT Content FROM logs WHERE Content LIKE '%SecurityManager%' AND Content LIKE '%acls%';",
+        "S3-W1: Anomaly Count",
+        f"SELECT COUNT(*) FROM logs WHERE {_ANOMALY_ILIKE};",
     ),
     (
-        "S3-W2: SecurityManager permissions",
-        "SELECT Content FROM logs WHERE Content LIKE '%SecurityManager%' AND Content LIKE '%permissions%';",
+        "S3-W2: Anomaly by Template",
+        f"SELECT EventTemplate, COUNT(*) FROM logs WHERE {_ANOMALY_ILIKE} GROUP BY 1 ORDER BY 2 DESC;",
+    ),
+    (
+        "S3-W3: Anomaly by EventId",
+        f"SELECT EventId, COUNT(*) FROM logs WHERE {_ANOMALY_ILIKE} GROUP BY 1 ORDER BY 2 DESC LIMIT 20;",
+    ),
+    (
+        "S3-W4: Anomaly Length Dist",
+        f"SELECT LENGTH(Content)/100*100 AS bucket, COUNT(*) FROM logs WHERE {_ANOMALY_ILIKE} GROUP BY 1 ORDER BY 1;",
+    ),
+    (
+        "S3-W5: Anomaly Content Stats",
+        f"SELECT SUM(LENGTH(Content)), AVG(LENGTH(Content)), COUNT(DISTINCT EventId) FROM logs WHERE {_ANOMALY_ILIKE};",
     ),
 ]
 
 STORIES = {
-    1: ("Story 1: Multi-Widget Auto-Refreshing Dashboard", STORY_1_QUERIES),
-    2: ("Story 2: SRE Interactive Drill-Down", STORY_2_QUERIES),
-    3: ("Story 3: Sliding Time Window", STORY_3_QUERIES),
+    1: ("Story 1: SRE Incident Investigation Dashboard", STORY_1_QUERIES),
+    2: ("Story 2: Log Search & Triage", STORY_2_QUERIES),
+    3: ("Story 3: Anomaly Detection Sweep", STORY_3_QUERIES),
 }
 
 
@@ -584,7 +650,7 @@ def main():
         f"Baseline: {args.repeat} warm runs with cache OFF. Cached: {args.repeat} warm runs with cache ON.",
         "OS page caches are dropped between baseline and cached passes.",
         "**Speedup = avg(baseline) / avg(cache hit)**\n",
-        "**Dataset:** Spark executor logs from LogHub-2.0 (Zenodo record 8196385)\n",
+        "**Dataset:** Spark executor logs from LogHub-2.0 (Zenodo record 8275861, ~16M rows)\n",
     ]
 
     for story_id in selected:
