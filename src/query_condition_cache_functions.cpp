@@ -23,6 +23,7 @@
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/local_storage.hpp"
 #include "query_condition_cache_state.hpp"
 
 namespace duckdb {
@@ -236,6 +237,46 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	for (const auto &local : local_entries) {
 		for (const auto &pair : local.bitvectors) {
 			entry->bitvectors[pair.first].MergeFrom(pair.second);
+		}
+	}
+
+	// Scan transaction-local storage (uncommitted INSERTs not yet checkpointed).
+	// Parallel scan only covers persistent row groups; local storage must be scanned separately.
+	auto &local_storage = LocalStorage::Get(transaction);
+	if (local_storage.Find(storage)) {
+		TableScanState local_scan_state;
+		local_scan_state.Initialize(column_ids);
+		local_storage.InitializeScan(storage, local_scan_state.local_state, /*table_filters=*/nullptr);
+
+		ExpressionExecutor local_executor(context, bound_expr);
+		DataChunk local_chunk;
+		local_chunk.Initialize(Allocator::Get(context), scan_types);
+
+		while (true) {
+			local_chunk.Reset();
+			local_storage.Scan(local_scan_state.local_state, column_ids, local_chunk);
+			if (local_chunk.size() == 0) {
+				break;
+			}
+
+			SelectionVector sel(local_chunk.size());
+			idx_t match_count = local_executor.SelectExpression(local_chunk, sel);
+
+			auto &rowid_vec = local_chunk.data[rowid_col_idx];
+			UnifiedVectorFormat rowid_data;
+			rowid_vec.ToUnifiedFormat(local_chunk.size(), rowid_data);
+			auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
+
+			for (idx_t idx = 0; idx < match_count; ++idx) {
+				auto rowid_entry = rowid_data.sel->get_index(sel.get_index(idx));
+				if (!rowid_data.validity.RowIsValid(rowid_entry)) {
+					continue;
+				}
+				auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
+				idx_t row_group_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
+				idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+				entry->bitvectors[row_group_idx].SetVector(vector_idx);
+			}
 		}
 	}
 
