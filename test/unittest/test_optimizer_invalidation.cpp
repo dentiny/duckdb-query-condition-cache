@@ -22,7 +22,7 @@ TEST_CASE("Optimizer invalidation - DELETE removes affected row groups from cach
 	BuildCache(con, "t", "id < 3000");
 	auto entry = LookupEntry(con, table_oid, "id < 3000");
 	REQUIRE(entry != nullptr);
-	REQUIRE(entry->bitvectors.size() == 1);
+	REQUIRE(entry->bitvectors.size() == 5);
 	REQUIRE(entry->bitvectors.count(0) == 1); // only RG0
 
 	// Also build a broad predicate that hits all RGs
@@ -37,7 +37,13 @@ TEST_CASE("Optimizer invalidation - DELETE removes affected row groups from cach
 
 	// The selective entry (only had RG0) should be fully removed
 	auto after_del = LookupEntry(con, table_oid, "id < 3000");
-	REQUIRE(after_del == nullptr);
+	REQUIRE(after_del != nullptr);
+	REQUIRE(after_del->bitvectors.size() == 4);
+	REQUIRE(after_del->bitvectors.count(0) == 0);
+	REQUIRE(after_del->bitvectors.count(1) == 1);
+	REQUIRE(after_del->bitvectors.count(2) == 1);
+	REQUIRE(after_del->bitvectors.count(3) == 1);
+	REQUIRE(after_del->bitvectors.count(4) == 1);
 
 	// The broad entry should have RG0 removed but RGs 1-4 preserved
 	auto broad_after = LookupEntry(con, table_oid, "val = 42");
@@ -87,7 +93,7 @@ TEST_CASE("Optimizer invalidation - INSERT only invalidates affected row groups"
 	BuildCache(con, "t", "id < 3000");
 	auto selective = LookupEntry(con, table_oid, "id < 3000");
 	REQUIRE(selective != nullptr);
-	REQUIRE(selective->bitvectors.size() == 1);
+	REQUIRE(selective->bitvectors.size() == 5);
 	REQUIRE(selective->bitvectors.count(0) == 1);
 
 	// Build cache with a broad predicate (all RGs)
@@ -103,7 +109,7 @@ TEST_CASE("Optimizer invalidation - INSERT only invalidates affected row groups"
 	// Selective entry (RG0 only) should be preserved — INSERT didn't touch RG0
 	auto selective_after = LookupEntry(con, table_oid, "id < 3000");
 	REQUIRE(selective_after != nullptr);
-	REQUIRE(selective_after->bitvectors.size() == 1);
+	REQUIRE(selective_after->bitvectors.size() == 4);
 	REQUIRE(selective_after->bitvectors.count(0) == 1);
 
 	// Broad entry should have RG4 invalidated, RGs 0-3 preserved

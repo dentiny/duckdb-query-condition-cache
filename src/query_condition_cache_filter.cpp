@@ -41,17 +41,17 @@ unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, 
 
 // --- Filter Function ---
 // All row_ids in a single vector call belong to the same vector range.
-// Check the bitvector once and return a constant boolean for the entire vector.
+// Check the vector-level mask once and return a constant boolean for the
+// entire vector.
 void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &bind_data = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<ConditionCacheFilterBindData>();
 	auto &entry = *bind_data.cache_entry;
 
 	auto &input_vec = args.data[0];
-	idx_t count = args.size();
 
 	// Get the first row_id to determine which vector we're in
 	UnifiedVectorFormat vdata;
-	input_vec.ToUnifiedFormat(count, vdata);
+	input_vec.ToUnifiedFormat(args.size(), vdata);
 	auto row_ids = UnifiedVectorFormat::GetData<int64_t>(vdata);
 
 	auto first_idx = vdata.sel->get_index(0);
@@ -59,16 +59,12 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 
 	idx_t rg_idx = NumericCast<idx_t>(first_row_id) / DEFAULT_ROW_GROUP_SIZE;
 	idx_t vec_idx = (NumericCast<idx_t>(first_row_id) % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-
-	// Default to true: if row group is not in cache (e.g. newly inserted),
-	// let it pass through to upper filter evaluation for correctness.
 	bool passes = true;
 	auto it = entry.bitvectors.find(rg_idx);
 	if (it != entry.bitvectors.end()) {
 		passes = it->second.VectorHasRows(vec_idx);
 	}
 
-	// Return constant result for the entire vector
 	result.Reference(Value::BOOLEAN(passes));
 }
 

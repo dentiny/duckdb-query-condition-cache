@@ -9,10 +9,12 @@
 using namespace duckdb;
 
 TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") {
-	// Build a cache entry with qualifying vectors in row group 0 and 2
+	// Build a cache entry with qualifying vectors in row group 0 and 2,
+	// and an explicitly cached empty row group 1.
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
 	entry->bitvectors[0].SetVector(0);
 	entry->bitvectors[0].SetVector(5);
+	entry->bitvectors[1];
 	entry->bitvectors[2].SetVector(10);
 
 	// Create a dummy expression for the filter (won't be evaluated in stats check)
@@ -27,12 +29,12 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
 	}
 
-	SECTION("row group without qualifying vectors: no pruning") {
-		// Stats covering row group 1 (row_ids 122880..245759) - no entry in cache
+	SECTION("known-empty row group: prune") {
+		// Stats covering row group 1 (row_ids 122880..245759)
 		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
 		NumericStats::SetMin(stats, Value::BIGINT(122880));
 		NumericStats::SetMax(stats, Value::BIGINT(200000));
-		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::FILTER_ALWAYS_FALSE);
 	}
 
 	SECTION("row group 2 with qualifying vectors: no pruning") {
