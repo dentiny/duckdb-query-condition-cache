@@ -18,12 +18,6 @@
 
 namespace duckdb {
 
-namespace {
-// Thread-local: table_index -> cache entry to inject in the post-optimize pass.
-// Populated by PreOptimizeFunction, consumed and cleared by OptimizeFunction.
-thread_local unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> tl_cache_apply_pending;
-} // namespace
-
 QueryConditionCacheOptimizer::QueryConditionCacheOptimizer() {
 	pre_optimize_function = PreOptimizeFunction;
 	optimize_function = OptimizeFunction;
@@ -54,18 +48,20 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	if (!IsSettingEnabled(input.context)) {
 		return;
 	}
-	tl_cache_apply_pending.clear();
+	auto query_state =
+	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>("qcc_optimizer_state");
+	query_state->cache_apply_pending.clear();
 	try {
-		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false);
+		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
 	} catch (...) {
 		// If anything goes wrong during pre-optimization, clear pending entries
 		// and let the query proceed without cache optimization
-		tl_cache_apply_pending.clear();
+		query_state->cache_apply_pending.clear();
 	}
 }
 
 void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
-                                                   bool inside_dml) {
+                                                   bool inside_dml, CacheOptimizerQueryState &state) {
 	// Check if this node is a DML operator — skip cache building in DML subplans
 	bool is_dml =
 	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
@@ -73,7 +69,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	bool child_inside_dml = inside_dml || is_dml;
 
 	for (auto &child : plan->children) {
-		PreOptimizeWalk(context, child, child_inside_dml);
+		PreOptimizeWalk(context, child, child_inside_dml, state);
 	}
 
 	if (inside_dml) {
@@ -118,7 +114,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	}
 
 	if (entry) {
-		tl_cache_apply_pending[get.table_index] = std::move(entry);
+		state.cache_apply_pending[get.table_index] = std::move(entry);
 	}
 }
 
@@ -178,16 +174,18 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 // ============================================================================
 
 void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	if (tl_cache_apply_pending.empty()) {
+	auto query_state = input.context.registered_state->Get<CacheOptimizerQueryState>("qcc_optimizer_state");
+	if (!query_state || query_state->cache_apply_pending.empty()) {
 		return;
 	}
-	PostOptimizeWalk(plan);
-	tl_cache_apply_pending.clear();
+	PostOptimizeWalk(plan, *query_state);
+	query_state->cache_apply_pending.clear();
 }
 
-void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> &plan) {
+void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> &plan,
+                                                    CacheOptimizerQueryState &state) {
 	for (auto &child : plan->children) {
-		PostOptimizeWalk(child);
+		PostOptimizeWalk(child, state);
 	}
 
 	if (plan->type != LogicalOperatorType::LOGICAL_GET) {
@@ -195,13 +193,13 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(unique_ptr<LogicalOperator> 
 	}
 
 	auto &get = plan->Cast<LogicalGet>();
-	auto it = tl_cache_apply_pending.find(get.table_index);
-	if (it == tl_cache_apply_pending.end()) {
+	auto it = state.cache_apply_pending.find(get.table_index);
+	if (it == state.cache_apply_pending.end()) {
 		return;
 	}
 
 	InjectCacheFilter(plan, it->second);
-	tl_cache_apply_pending.erase(it);
+	state.cache_apply_pending.erase(it);
 }
 
 // ============================================================================

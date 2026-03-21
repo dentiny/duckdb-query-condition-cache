@@ -2,9 +2,20 @@
 
 #include "query_condition_cache_state.hpp"
 
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 
 namespace duckdb {
+
+//! Query-scoped state for passing cache entries between pre-optimize and post-optimize phases.
+//! Stored in ClientContext::registered_state; automatically cleared on QueryEnd.
+struct CacheOptimizerQueryState : public ClientContextState {
+	unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> cache_apply_pending;
+
+	void QueryEnd(ClientContext &context, optional_ptr<ErrorData> error) override {
+		cache_apply_pending.clear();
+	}
+};
 
 class QueryConditionCacheOptimizer : public OptimizerExtension {
 public:
@@ -22,10 +33,11 @@ private:
 	static bool IsSettingEnabled(ClientContext &context);
 
 	//! Walk plan pre-pushdown: find LogicalFilter→LogicalGet, compute key, lookup/build cache
-	static void PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan, bool inside_dml);
+	static void PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan, bool inside_dml,
+	                            CacheOptimizerQueryState &state);
 
 	//! Walk plan post-pushdown: inject cache filters for pending entries
-	static void PostOptimizeWalk(unique_ptr<LogicalOperator> &plan);
+	static void PostOptimizeWalk(unique_ptr<LogicalOperator> &plan, CacheOptimizerQueryState &state);
 
 	//! Compute a canonical predicate key from filter expressions (sorted, joined with ";")
 	static CacheKey ComputePredicateKey(idx_t table_oid, const vector<unique_ptr<Expression>> &expressions);
