@@ -101,8 +101,8 @@ class CacheBuildTask : public BaseExecutorTask {
 public:
 	CacheBuildTask(TaskExecutor &executor, ClientContext &context, DataTable &storage, DuckTransaction &transaction,
 	               ParallelTableScanState &parallel_state, Expression &bound_expr,
-	               const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types,
-	               idx_t rowid_col_idx, ConditionCacheEntry &local_entry)
+	               const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types, idx_t rowid_col_idx,
+	               ConditionCacheEntry &local_entry)
 	    : BaseExecutorTask(executor), context(context), storage(storage), transaction(transaction),
 	      parallel_state(parallel_state), bound_expr(bound_expr), column_ids(column_ids), scan_types(scan_types),
 	      rowid_col_idx(rowid_col_idx), local_entry(local_entry) {
@@ -125,23 +125,23 @@ public:
 					break;
 				}
 
-				SelectionVector sel(chunk.size());
-				idx_t match_count = expr_executor.SelectExpression(chunk, sel);
-
 				auto &rowid_vec = chunk.data[rowid_col_idx];
 				UnifiedVectorFormat rowid_data;
 				rowid_vec.ToUnifiedFormat(chunk.size(), rowid_data);
 				auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
+				auto first_rowid_idx = rowid_data.sel->get_index(0);
+				if (!rowid_data.validity.RowIsValid(first_rowid_idx)) {
+					continue;
+				}
+				auto first_row_id = NumericCast<idx_t>(rowids[first_rowid_idx]);
+				idx_t row_group_idx = first_row_id / DEFAULT_ROW_GROUP_SIZE;
+				idx_t vector_idx = (first_row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+				auto &row_group_filter = local_entry.bitvectors[row_group_idx];
 
-				for (idx_t idx = 0; idx < match_count; ++idx) {
-					auto rowid_entry = rowid_data.sel->get_index(sel.get_index(idx));
-					if (!rowid_data.validity.RowIsValid(rowid_entry)) {
-						continue;
-					}
-					auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
-					idx_t row_group_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
-					idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-					local_entry.bitvectors[row_group_idx].SetVector(vector_idx);
+				SelectionVector sel(chunk.size());
+				idx_t match_count = expr_executor.SelectExpression(chunk, sel);
+				if (match_count > 0) {
+					row_group_filter.SetVector(vector_idx);
 				}
 			}
 		}
@@ -211,7 +211,7 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	vector<ColumnIndex> column_indexes;
 	column_indexes.reserve(column_ids.size());
 	for (const auto &si : column_ids) {
-		column_indexes.emplace_back(ColumnIndex(si.GetPrimaryIndex()));
+		column_indexes.emplace_back(si.GetPrimaryIndex());
 	}
 
 	ParallelTableScanState parallel_state;
@@ -261,7 +261,12 @@ CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t t
 		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
 	}
 
-	idx_t qualifying_row_groups = entry.bitvectors.size();
+	idx_t qualifying_row_groups = 0;
+	for (const auto &bitvector_pair : entry.bitvectors) {
+		if (!bitvector_pair.second.IsEmpty()) {
+			++qualifying_row_groups;
+		}
+	}
 	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
 
 	return CacheEntryStats {
