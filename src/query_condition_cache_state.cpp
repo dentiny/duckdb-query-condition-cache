@@ -40,6 +40,8 @@ void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
 // ------- CONDITION_CACHE_ENTRY -------
 
 optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {
+	// Rough estimate: each RowGroupFilter is ~BITVECTOR_ARRAY_SIZE * 8 bytes
+	// Plus overhead for the map structure
 	idx_t estimated_size = sizeof(ConditionCacheEntry);
 	estimated_size += bitvectors.size() * (sizeof(idx_t) + sizeof(RowGroupFilter) + 32); // map overhead
 	return optional_idx(estimated_size);
@@ -128,28 +130,6 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 			index->Remove(filter_key);
 		}
 	}
-	return removed_count;
-}
-
-idx_t ConditionCacheStore::RemoveEntriesForTable(ClientContext &context, idx_t table_oid) {
-	auto &cache = ObjectCache::GetObjectCache(context);
-
-	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
-	if (!index) {
-		return 0;
-	}
-
-	auto filter_keys = index->GetAll();
-	idx_t removed_count = 0;
-	for (auto &filter_key : filter_keys) {
-		CacheKey key {table_oid, filter_key};
-		string cache_key = MakeCacheKeyString(key);
-		if (cache.Get<ConditionCacheEntry>(cache_key)) {
-			cache.Delete(cache_key);
-			++removed_count;
-		}
-	}
-	cache.Delete(MakeFilterKeyIndexKey(table_oid));
 	return removed_count;
 }
 
