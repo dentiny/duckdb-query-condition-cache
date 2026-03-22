@@ -10,6 +10,8 @@
 #include "duckdb/common/vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parallel/task_executor.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -17,6 +19,7 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
@@ -93,9 +96,87 @@ struct ScanColumn {
 	LogicalType type;
 };
 
+// Task that scans a subset of row groups in parallel and builds a local ConditionCacheEntry.
+class CacheBuildTask : public BaseExecutorTask {
+public:
+	CacheBuildTask(TaskExecutor &executor, ClientContext &context, DataTable &storage, DuckTransaction &transaction,
+	               ParallelTableScanState &parallel_state, Expression &bound_expr,
+	               const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types, idx_t rowid_col_idx,
+	               ConditionCacheEntry &local_entry)
+	    : BaseExecutorTask(executor), context(context), storage(storage), transaction(transaction),
+	      parallel_state(parallel_state), bound_expr(bound_expr), column_ids(column_ids), scan_types(scan_types),
+	      rowid_col_idx(rowid_col_idx), local_entry(local_entry) {
+	}
+
+	void ExecuteTask() override {
+		TableScanState scan_state;
+		scan_state.Initialize(column_ids);
+
+		ExpressionExecutor expr_executor(context, bound_expr);
+
+		DataChunk chunk;
+		chunk.Initialize(Allocator::Get(context), scan_types);
+
+		while (storage.NextParallelScan(context, parallel_state, scan_state)) {
+			while (true) {
+				chunk.Reset();
+				storage.Scan(transaction, chunk, scan_state);
+				if (chunk.size() == 0) {
+					break;
+				}
+
+				auto &rowid_vec = chunk.data[rowid_col_idx];
+				UnifiedVectorFormat rowid_data;
+				rowid_vec.ToUnifiedFormat(chunk.size(), rowid_data);
+				auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
+
+				// Determine row group from first row_id and instantiate its entry
+				// so that fully excluded row groups are recorded with empty bitvectors.
+				auto first_rowid_idx = rowid_data.sel->get_index(0);
+				if (!rowid_data.validity.RowIsValid(first_rowid_idx)) {
+					continue;
+				}
+				auto first_row_id = NumericCast<idx_t>(rowids[first_rowid_idx]);
+				idx_t row_group_idx = first_row_id / DEFAULT_ROW_GROUP_SIZE;
+				// Access to instantiate default RowGroupFilter for this row group
+				(void)local_entry.bitvectors[row_group_idx];
+
+				SelectionVector sel(chunk.size());
+				idx_t match_count = expr_executor.SelectExpression(chunk, sel);
+
+				for (idx_t idx = 0; idx < match_count; ++idx) {
+					auto rowid_entry = rowid_data.sel->get_index(sel.get_index(idx));
+					if (!rowid_data.validity.RowIsValid(rowid_entry)) {
+						continue;
+					}
+					auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
+					idx_t rg_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
+					idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+					local_entry.bitvectors[rg_idx].SetVector(vector_idx);
+				}
+			}
+		}
+	}
+
+	string TaskType() const override {
+		return "CacheBuildTask";
+	}
+
+private:
+	ClientContext &context;
+	DataTable &storage;
+	DuckTransaction &transaction;
+	ParallelTableScanState &parallel_state;
+	Expression &bound_expr;
+	const vector<StorageIndex> &column_ids;
+	const vector<LogicalType> &scan_types;
+	idx_t rowid_col_idx;
+	ConditionCacheEntry &local_entry;
+};
+
 } // namespace
 
-// Scan all rows, evaluate predicate, and build a ConditionCacheEntry.
+// Scan all rows in parallel, evaluate predicate, and build a ConditionCacheEntry.
 // Modifies bound_expr in-place (remaps column indices to scan positions).
 shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTableEntry &table_entry,
                                                 Expression &bound_expr) {
@@ -134,41 +215,38 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 
 	RemapColumnIndices(bound_expr, storage_to_scan_idx);
 
-	// Direct table scan with predicate evaluation via ExpressionExecutor
+	// Parallel table scan with TaskExecutor
 	auto &transaction = DuckTransaction::Get(context, table_entry.ParentCatalog().GetAttached());
-	TableScanState scan_state;
-	storage.InitializeScan(context, transaction, scan_state, column_ids);
 
-	// Scan and evaluate predicate
-	ExpressionExecutor executor(context, bound_expr);
+	// Build ColumnIndex vector for parallel scan initialization
+	vector<ColumnIndex> column_indexes;
+	column_indexes.reserve(column_ids.size());
+	for (const auto &si : column_ids) {
+		column_indexes.emplace_back(si.GetPrimaryIndex());
+	}
 
+	ParallelTableScanState parallel_state;
+	storage.InitializeParallelScan(context, parallel_state, column_indexes);
+
+	auto num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	idx_t num_tasks = MinValue(storage.MaxThreads(context), num_threads);
+	num_tasks = MaxValue<idx_t>(num_tasks, 1);
+
+	vector<ConditionCacheEntry> local_entries(num_tasks);
+
+	TaskExecutor task_executor(context);
+	for (idx_t i = 0; i < num_tasks; ++i) {
+		task_executor.ScheduleTask(make_uniq<CacheBuildTask>(task_executor, context, storage, transaction,
+		                                                     parallel_state, bound_expr, column_ids, scan_types,
+		                                                     rowid_col_idx, local_entries[i]));
+	}
+	task_executor.WorkOnTasks();
+
+	// Merge local entries into final result
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
-
-	while (true) {
-		DataChunk chunk;
-		chunk.Initialize(Allocator::Get(context), scan_types);
-		storage.Scan(transaction, chunk, scan_state);
-		if (chunk.size() == 0) {
-			break;
-		}
-
-		SelectionVector sel(chunk.size());
-		idx_t match_count = executor.SelectExpression(chunk, sel);
-
-		auto &rowid_vec = chunk.data[rowid_col_idx];
-		UnifiedVectorFormat rowid_data;
-		rowid_vec.ToUnifiedFormat(chunk.size(), rowid_data);
-		auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
-
-		for (idx_t idx = 0; idx < match_count; ++idx) {
-			auto rowid_entry = rowid_data.sel->get_index(sel.get_index(idx));
-			if (!rowid_data.validity.RowIsValid(rowid_entry)) {
-				continue;
-			}
-			auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
-			idx_t row_group_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
-			idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-			entry->bitvectors[row_group_idx].SetVector(vector_idx);
+	for (const auto &local : local_entries) {
+		for (const auto &pair : local.bitvectors) {
+			entry->bitvectors[pair.first].MergeFrom(pair.second);
 		}
 	}
 
@@ -194,7 +272,12 @@ CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t t
 		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
 	}
 
-	idx_t qualifying_row_groups = entry.bitvectors.size();
+	idx_t qualifying_row_groups = 0;
+	for (const auto &bitvector_pair : entry.bitvectors) {
+		if (!bitvector_pair.second.IsEmpty()) {
+			++qualifying_row_groups;
+		}
+	}
 	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
 
 	return CacheEntryStats {

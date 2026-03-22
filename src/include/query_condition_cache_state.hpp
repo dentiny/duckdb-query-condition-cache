@@ -29,6 +29,7 @@ struct RowGroupFilter {
 	void SetVector(idx_t vector_index);
 	bool VectorHasRows(idx_t vector_index) const;
 	bool IsEmpty() const;
+	void MergeFrom(const RowGroupFilter &other);
 };
 
 // Composite key for cache lookup: (table_oid, filter_key)

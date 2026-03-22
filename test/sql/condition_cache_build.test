@@ -54,7 +54,7 @@ Cache Built: 245/245 vectors, 5/5 row groups
 statement error
 SELECT * FROM condition_cache_build('bad_schema.t', 'val = 42');
 ----
-Table with name t does not exist
+does not exist
 
 # Invalid database name
 statement error

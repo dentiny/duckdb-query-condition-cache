@@ -31,6 +31,12 @@ bool RowGroupFilter::IsEmpty() const {
 	return true;
 }
 
+void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
+	for (idx_t i = 0; i < BITVECTOR_ARRAY_SIZE; ++i) {
+		matching_vectors[i] |= other.matching_vectors[i];
+	}
+}
+
 // ------- CONDITION_CACHE_ENTRY -------
 
 optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {

@@ -10,7 +10,7 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 
-using namespace duckdb;
+namespace duckdb {
 
 TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 	DuckDB db(nullptr);
@@ -54,7 +54,11 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(entry->bitvectors.size() == 1); // only row group 0
+		REQUIRE(entry->bitvectors.size() == 5); // all row groups are cached
+		REQUIRE(entry->bitvectors.at(0).VectorHasRows(0));
+		REQUIRE(entry->bitvectors.at(0).VectorHasRows(1));
+		REQUIRE_FALSE(entry->bitvectors.at(0).VectorHasRows(2));
+		REQUIRE(entry->bitvectors.at(1).IsEmpty());
 	}
 
 	SECTION("odd values pass, even values don't") {
@@ -89,6 +93,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(entry->bitvectors.empty());
+		REQUIRE(entry->bitvectors.size() == 5);
+		REQUIRE(entry->bitvectors.at(0).IsEmpty());
+		REQUIRE(entry->bitvectors.at(4).IsEmpty());
 	}
 }
+} // namespace duckdb
