@@ -99,13 +99,14 @@ struct ScanColumn {
 // Task that scans a subset of row groups in parallel and builds a local ConditionCacheEntry.
 class CacheBuildTask : public BaseExecutorTask {
 public:
-	CacheBuildTask(TaskExecutor &executor, ClientContext &context, DataTable &storage, DuckTransaction &transaction,
-	               ParallelTableScanState &parallel_state, Expression &bound_expr,
-	               const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types, idx_t rowid_col_idx,
-	               ConditionCacheEntry &local_entry)
-	    : BaseExecutorTask(executor), context(context), storage(storage), transaction(transaction),
-	      parallel_state(parallel_state), bound_expr(bound_expr), column_ids(column_ids), scan_types(scan_types),
-	      rowid_col_idx(rowid_col_idx), local_entry(local_entry) {
+	CacheBuildTask(TaskExecutor &executor_p, ClientContext &context_p, DataTable &storage_p,
+	               DuckTransaction &transaction_p, ParallelTableScanState &parallel_state_p,
+	               Expression &bound_expr_p, const vector<StorageIndex> &column_ids_p,
+	               const vector<LogicalType> &scan_types_p, idx_t rowid_col_idx_p,
+	               ConditionCacheEntry &local_entry_p)
+	    : BaseExecutorTask(executor_p), context(context_p), storage(storage_p), transaction(transaction_p),
+	      parallel_state(parallel_state_p), bound_expr(bound_expr_p), column_ids(column_ids_p),
+	      scan_types(scan_types_p), rowid_col_idx(rowid_col_idx_p), local_entry(local_entry_p) {
 	}
 
 	void ExecuteTask() override {
