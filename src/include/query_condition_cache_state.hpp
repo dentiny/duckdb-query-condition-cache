@@ -48,6 +48,13 @@ struct CacheKeyHashFunction {
 	}
 };
 
+struct CacheEntryStats {
+	idx_t qualifying_vectors;
+	idx_t total_vectors;
+	idx_t qualifying_row_groups;
+	idx_t total_row_groups;
+};
+
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
 	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
@@ -62,6 +69,9 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 
 	// Return estimated memory usage for LRU eviction
 	optional_idx GetEstimatedCacheMemory() const override;
+
+	// Compute statistics about qualifying vectors and row groups
+	CacheEntryStats ComputeStats(idx_t total_rows) const;
 };
 
 // Stored in DuckDB's per-database ObjectCache

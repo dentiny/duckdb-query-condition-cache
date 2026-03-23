@@ -30,6 +30,7 @@ install(
 
 add_subdirectory(test/unittest)
 
-add_executable(benchmark_cache_build EXCLUDE_FROM_ALL
-               benchmark/benchmark_cache_build.cpp)
-target_link_libraries(benchmark_cache_build duckdb ${EXTENSION_NAME})
+if(BUILD_BENCHMARK)
+  add_executable(benchmark_cache_build benchmark/benchmark_cache_build.cpp)
+  target_link_libraries(benchmark_cache_build duckdb ${EXTENSION_NAME})
+endif()

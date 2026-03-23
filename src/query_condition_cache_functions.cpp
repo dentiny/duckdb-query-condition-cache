@@ -246,47 +246,12 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	// Merge local entries into final result
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
 	for (const auto &local : local_entries) {
-		for (const auto &pair : local.bitvectors) {
-			entry->bitvectors[pair.first].MergeFrom(pair.second);
+		for (const auto &[rg_idx, filter] : local.bitvectors) {
+			entry->bitvectors[rg_idx].MergeFrom(filter);
 		}
 	}
 
 	return entry;
-}
-
-CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t total_rows) {
-	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
-
-	idx_t qualifying_vectors = 0;
-	for (const auto &bitvector_pair : entry.bitvectors) {
-		for (idx_t v = 0; v < vectors_per_row_group; ++v) {
-			if (bitvector_pair.second.VectorHasRows(v)) {
-				++qualifying_vectors;
-			}
-		}
-	}
-
-	idx_t full_row_groups = total_rows / DEFAULT_ROW_GROUP_SIZE;
-	idx_t remaining_rows = total_rows % DEFAULT_ROW_GROUP_SIZE;
-	idx_t total_vectors = full_row_groups * vectors_per_row_group;
-	if (remaining_rows > 0) {
-		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
-	}
-
-	idx_t qualifying_row_groups = 0;
-	for (const auto &bitvector_pair : entry.bitvectors) {
-		if (!bitvector_pair.second.IsEmpty()) {
-			++qualifying_row_groups;
-		}
-	}
-	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
-
-	return CacheEntryStats {
-	    .qualifying_vectors = qualifying_vectors,
-	    .total_vectors = total_vectors,
-	    .qualifying_row_groups = qualifying_row_groups,
-	    .total_row_groups = total_row_groups,
-	};
 }
 
 void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -316,7 +281,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 	auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
-	auto stats = ComputeCacheEntryStats(*entry, bind_data.total_rows);
+	auto stats = entry->ComputeStats(bind_data.total_rows);
 
 	// Store in cache
 	// TODO: Use canonical predicate key (sorted expressions) so that "a AND b" and "b AND a" hit same entry

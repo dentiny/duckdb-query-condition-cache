@@ -47,6 +47,38 @@ optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {
 	return optional_idx(estimated_size);
 }
 
+CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
+	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
+
+	idx_t qualifying_vectors = 0;
+	idx_t qualifying_row_groups = 0;
+	for (const auto &[rg_idx, filter] : bitvectors) {
+		if (!filter.IsEmpty()) {
+			++qualifying_row_groups;
+		}
+		for (idx_t v = 0; v < vectors_per_row_group; ++v) {
+			if (filter.VectorHasRows(v)) {
+				++qualifying_vectors;
+			}
+		}
+	}
+
+	idx_t full_row_groups = total_rows / DEFAULT_ROW_GROUP_SIZE;
+	idx_t remaining_rows = total_rows % DEFAULT_ROW_GROUP_SIZE;
+	idx_t total_vectors = full_row_groups * vectors_per_row_group;
+	if (remaining_rows > 0) {
+		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+	}
+	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
+
+	return CacheEntryStats {
+	    .qualifying_vectors = qualifying_vectors,
+	    .total_vectors = total_vectors,
+	    .qualifying_row_groups = qualifying_row_groups,
+	    .total_row_groups = total_row_groups,
+	};
+}
+
 // ------- CONDITION_CACHE_STORE -------
 
 string ConditionCacheStore::MakeCacheKeyString(const CacheKey &key) {
