@@ -138,6 +138,9 @@ public:
 					continue;
 				}
 				auto first_row_id = NumericCast<idx_t>(rowids[first_rowid_idx]);
+				if (first_row_id >= NumericCast<idx_t>(MAX_ROW_ID)) {
+					continue; // skip transaction-local storage rows
+				}
 				idx_t row_group_idx = first_row_id / DEFAULT_ROW_GROUP_SIZE;
 				// Access to instantiate default RowGroupFilter for this row group
 				(void)local_entry.bitvectors[row_group_idx];
