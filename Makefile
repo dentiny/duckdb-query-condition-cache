@@ -31,7 +31,7 @@ format-all: format
 	cmake-format -i test/unittest/CMakeLists.txt
 
 benchmark_cache_build:
-	cmake -DBUILD_BENCHMARK=ON -B build/release -S duckdb
+	cmake -DBUILD_BENCHMARKS=ON -B build/release -S duckdb
 	cmake --build build/release --target benchmark_cache_build
 	./build/release/extension/query_condition_cache/benchmark_cache_build
 
