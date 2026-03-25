@@ -1,7 +1,7 @@
 #include "catch/catch.hpp"
 #include "query_condition_cache_state.hpp"
 
-using namespace duckdb;
+namespace duckdb {
 
 TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 	SECTION("default constructor is empty") {
@@ -45,4 +45,15 @@ TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 		REQUIRE(bv.VectorHasRows(5));
 		REQUIRE_FALSE(bv.VectorHasRows(6));
 	}
+
+	SECTION("MergeFrom combines two filters") {
+		RowGroupFilter a({1, 3});
+		RowGroupFilter b({2, 3});
+		a.MergeFrom(b);
+		REQUIRE(a.VectorHasRows(1));
+		REQUIRE(a.VectorHasRows(2));
+		REQUIRE(a.VectorHasRows(3));
+		REQUIRE_FALSE(a.VectorHasRows(0));
+	}
 }
+} // namespace duckdb

@@ -30,4 +30,9 @@ format-all: format
 	cmake-format -i CMakeLists.txt
 	cmake-format -i test/unittest/CMakeLists.txt
 
-PHONY: format-all test_release_all test_debug_all test_reldebug_all
+benchmark_cache_build:
+	cmake -DBUILD_BENCHMARKS=ON -B build/release -S duckdb
+	cmake --build build/release --target benchmark_cache_build
+	./build/release/extension/query_condition_cache/benchmark_cache_build
+
+PHONY: format-all test_release_all test_debug_all test_reldebug_all benchmark_cache_build

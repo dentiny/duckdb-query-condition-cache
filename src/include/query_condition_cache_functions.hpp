@@ -16,16 +16,6 @@ class Expression;
 shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTableEntry &table_entry,
                                                 Expression &bound_expr);
 
-struct CacheEntryStats {
-	idx_t qualifying_vectors;
-	idx_t total_vectors;
-	idx_t qualifying_row_groups;
-	idx_t total_row_groups;
-};
-
-// TODO: Exposed for future reuse.
-CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t total_rows);
-
 TableFunction ConditionCacheBuildFunction();
 
 } // namespace duckdb

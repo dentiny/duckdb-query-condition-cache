@@ -29,3 +29,8 @@ install(
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
 add_subdirectory(test/unittest)
+
+if(${BUILD_BENCHMARKS})
+  add_executable(benchmark_cache_build benchmark/benchmark_cache_build.cpp)
+  target_link_libraries(benchmark_cache_build duckdb ${EXTENSION_NAME})
+endif()
