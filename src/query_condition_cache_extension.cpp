@@ -20,6 +20,7 @@ void EnableQueryConditionCacheCallback(ClientContext &context, SetScope scope, V
 
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheBuildFunction());
+	loader.RegisterFunction(ConditionCacheInfoFunction());
 
 	// Register extension settings
 	auto &db_instance = loader.GetDatabaseInstance();

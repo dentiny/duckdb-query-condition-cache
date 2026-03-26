@@ -1,0 +1,51 @@
+# name: test/sql/condition_cache_info.test
+# description: Test condition_cache_info table function
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+# No cache entry yet
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+0	0	0	0
+
+# Build cache
+statement ok
+SELECT * FROM condition_cache_build('t', 'val = 42');
+
+# Cache entry exists
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245
+
+# Different predicate has no cache
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 99');
+----
+0	0	0	0
+
+# Selective predicate
+statement ok
+SELECT * FROM condition_cache_build('t', 'id < 3000');
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'id < 3000');
+----
+1	5	2	245
+
+# Qualified table name works
+query IIII
+SELECT * FROM condition_cache_info('main.t', 'val = 42');
+----
+5	5	245	245
+
+# Nonexistent table throws error
+statement error
+SELECT * FROM condition_cache_info('nonexistent', 'val = 42');
+----
+Table with name nonexistent does not exist

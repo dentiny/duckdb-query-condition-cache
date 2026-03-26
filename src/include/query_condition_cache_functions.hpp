@@ -17,5 +17,6 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
                                                 Expression &bound_expr);
 
 TableFunction ConditionCacheBuildFunction();
+TableFunction ConditionCacheInfoFunction();
 
 } // namespace duckdb
