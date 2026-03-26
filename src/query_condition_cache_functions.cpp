@@ -100,10 +100,9 @@ struct ScanColumn {
 class CacheBuildTask : public BaseExecutorTask {
 public:
 	CacheBuildTask(TaskExecutor &executor_p, ClientContext &context_p, DataTable &storage_p,
-	               DuckTransaction &transaction_p, ParallelTableScanState &parallel_state_p,
-	               Expression &bound_expr_p, const vector<StorageIndex> &column_ids_p,
-	               const vector<LogicalType> &scan_types_p, idx_t rowid_col_idx_p,
-	               ConditionCacheEntry &local_entry_p)
+	               DuckTransaction &transaction_p, ParallelTableScanState &parallel_state_p, Expression &bound_expr_p,
+	               const vector<StorageIndex> &column_ids_p, const vector<LogicalType> &scan_types_p,
+	               idx_t rowid_col_idx_p, ConditionCacheEntry &local_entry_p)
 	    : BaseExecutorTask(executor_p), context(context_p), storage(storage_p), transaction(transaction_p),
 	      parallel_state(parallel_state_p), bound_expr(bound_expr_p), column_ids(column_ids_p),
 	      scan_types(scan_types_p), rowid_col_idx(rowid_col_idx_p), local_entry(local_entry_p) {
@@ -279,6 +278,9 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
 	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
+	// Bound expression ToString() normalizes whitespace and formatting for cache key
+	string bound_expr_str = bound_expr->ToString();
+
 	// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN for SelectExpression.
 	bound_expr =
 	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
@@ -286,10 +288,8 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 	auto stats = entry->ComputeStats(bind_data.total_rows);
 
-	// Store in cache
-	// TODO: Use canonical predicate key (sorted expressions) so that "a AND b" and "b AND a" hit same entry
 	// TODO: Invalidate cache on table modification (INSERT/DELETE/UPDATE/VACUUM)
-	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
+	CacheKey key {bind_data.table_oid, std::move(bound_expr_str)};
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	store->Upsert(context, key, std::move(entry));
 
@@ -304,6 +304,93 @@ TableFunction ConditionCacheBuildFunction() {
 	    "condition_cache_build",
 	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
 	    ConditionCacheBuildExecute, ConditionCacheBuildBind, ConditionCacheBuildInit);
+	return func;
+}
+
+// ------- condition_cache_info(table_name VARCHAR, predicate VARCHAR) -------
+// Returns cache statistics for a given (table, predicate) pair.
+
+struct ConditionCacheInfoBindData : public TableFunctionData {
+	idx_t table_oid;
+	idx_t total_rows;
+	string canonical_key;
+};
+
+struct ConditionCacheInfoState : public GlobalTableFunctionState {
+	bool done = false;
+};
+
+unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<string> &names) {
+	auto result = make_uniq<ConditionCacheInfoBindData>();
+	auto predicate_sql = input.inputs[1].GetValue<string>();
+
+	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
+	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
+
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, qname.catalog, qname.schema, qname.name);
+	result->table_oid = table_entry.oid;
+	result->total_rows = table_entry.GetStorage().GetTotalRows();
+
+	// Parse and bind predicate to produce a canonical key
+	auto parsed_exprs = Parser::ParseExpressionList(predicate_sql);
+	if (!parsed_exprs.empty()) {
+		auto binder = Binder::CreateBinder(context);
+		physical_index_set_t bound_columns;
+		CheckBinder check_binder(*binder, context, qname.name, table_entry.GetColumns(), bound_columns);
+		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
+		result->canonical_key = bound_expr->ToString();
+	}
+
+	names.reserve(4);
+	return_types.reserve(4);
+	names.emplace_back("cached_row_groups");
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
+	names.emplace_back("total_row_groups");
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
+	names.emplace_back("qualifying_vectors");
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
+	names.emplace_back("total_vectors");
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
+
+	return result;
+}
+
+unique_ptr<GlobalTableFunctionState> ConditionCacheInfoInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<ConditionCacheInfoState>();
+}
+
+void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &gstate = data_p.global_state->Cast<ConditionCacheInfoState>();
+	if (gstate.done) {
+		return;
+	}
+	gstate.done = true;
+
+	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheInfoBindData>();
+	CacheKey key {bind_data.table_oid, bind_data.canonical_key};
+	auto store = ConditionCacheStore::GetOrCreate(context);
+	auto entry = store->Lookup(context, key);
+
+	output.SetCardinality(1);
+	if (entry) {
+		auto stats = entry->ComputeStats(bind_data.total_rows);
+		output.data[0].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_row_groups)));
+		output.data[1].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_row_groups)));
+		output.data[2].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_vectors)));
+		output.data[3].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_vectors)));
+	} else {
+		for (idx_t col = 0; col < 4; ++col) {
+			output.data[col].SetValue(0, Value::INTEGER(0));
+		}
+	}
+}
+
+TableFunction ConditionCacheInfoFunction() {
+	TableFunction func(
+	    "condition_cache_info",
+	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
+	    ConditionCacheInfoExecute, ConditionCacheInfoBind, ConditionCacheInfoInit);
 	return func;
 }
 
