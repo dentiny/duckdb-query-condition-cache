@@ -278,8 +278,8 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
 	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-	// Canonical key: bound expression normalizes whitespace and formatting
-	string canonical_key = bound_expr->ToString();
+	// Bound expression ToString() normalizes whitespace and formatting for cache key
+	string bound_expr_str = bound_expr->ToString();
 
 	// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN for SelectExpression.
 	bound_expr =
@@ -289,7 +289,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	auto stats = entry->ComputeStats(bind_data.total_rows);
 
 	// TODO: Invalidate cache on table modification (INSERT/DELETE/UPDATE/VACUUM)
-	CacheKey key {bind_data.table_oid, canonical_key};
+	CacheKey key {bind_data.table_oid, std::move(bound_expr_str)};
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	store->Upsert(context, key, std::move(entry));
 
