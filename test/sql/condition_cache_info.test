@@ -44,6 +44,17 @@ SELECT * FROM condition_cache_info('main.t', 'val = 42');
 ----
 5	5	245	245
 
+# Canonical key: different whitespace hits same cache entry
+query IIII
+SELECT * FROM condition_cache_info('t', 'val=42');
+----
+5	5	245	245
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val  =   42');
+----
+5	5	245	245
+
 # Nonexistent table throws error
 statement error
 SELECT * FROM condition_cache_info('nonexistent', 'val = 42');

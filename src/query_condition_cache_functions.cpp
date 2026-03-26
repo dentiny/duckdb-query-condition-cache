@@ -278,6 +278,9 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
 	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
+	// Canonical key: bound expression normalizes whitespace and formatting
+	string canonical_key = bound_expr->ToString();
+
 	// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN for SelectExpression.
 	bound_expr =
 	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
@@ -285,10 +288,8 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 	auto stats = entry->ComputeStats(bind_data.total_rows);
 
-	// Store in cache
-	// TODO: Use canonical predicate key (sorted expressions) so that "a AND b" and "b AND a" hit same entry
 	// TODO: Invalidate cache on table modification (INSERT/DELETE/UPDATE/VACUUM)
-	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
+	CacheKey key {bind_data.table_oid, canonical_key};
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	store->Upsert(context, key, std::move(entry));
 
@@ -312,7 +313,7 @@ TableFunction ConditionCacheBuildFunction() {
 struct ConditionCacheInfoBindData : public TableFunctionData {
 	idx_t table_oid;
 	idx_t total_rows;
-	string predicate_sql;
+	string canonical_key;
 };
 
 struct ConditionCacheInfoState : public GlobalTableFunctionState {
@@ -322,7 +323,7 @@ struct ConditionCacheInfoState : public GlobalTableFunctionState {
 unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<ConditionCacheInfoBindData>();
-	result->predicate_sql = input.inputs[1].GetValue<string>();
+	auto predicate_sql = input.inputs[1].GetValue<string>();
 
 	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
 	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
@@ -330,6 +331,16 @@ unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFun
 	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, qname.catalog, qname.schema, qname.name);
 	result->table_oid = table_entry.oid;
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
+
+	// Parse and bind predicate to produce a canonical key
+	auto parsed_exprs = Parser::ParseExpressionList(predicate_sql);
+	if (!parsed_exprs.empty()) {
+		auto binder = Binder::CreateBinder(context);
+		physical_index_set_t bound_columns;
+		CheckBinder check_binder(*binder, context, qname.name, table_entry.GetColumns(), bound_columns);
+		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
+		result->canonical_key = bound_expr->ToString();
+	}
 
 	names.reserve(4);
 	return_types.reserve(4);
@@ -357,7 +368,7 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 	gstate.done = true;
 
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheInfoBindData>();
-	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
+	CacheKey key {bind_data.table_oid, bind_data.canonical_key};
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(context, key);
 
