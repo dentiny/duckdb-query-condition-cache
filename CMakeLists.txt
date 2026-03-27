@@ -17,7 +17,9 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/query_condition_cache_extension.cpp
-    src/query_condition_cache_functions.cpp src/query_condition_cache_state.cpp)
+    src/query_condition_cache_functions.cpp
+    src/query_condition_cache_optimizer.cpp
+    src/query_condition_cache_state.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

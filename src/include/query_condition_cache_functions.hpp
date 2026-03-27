@@ -9,6 +9,11 @@ namespace duckdb {
 class DuckTableEntry;
 class Expression;
 
+// Normalize comparison operand order in-place: put foldable constants on the right
+// so that "42 = val" and "val = 42" produce the same ToString() for cache key.
+// Reference: duckdb/src/optimizer/rule/comparison_simplification.cpp
+void NormalizeExpressionForKey(Expression &expr);
+
 // TODO: Exposed for future reuse and C++ unit testing.
 // Scan all rows in the table, evaluate bound_expr, and build a ConditionCacheEntry
 // recording which vectors contain qualifying rows.

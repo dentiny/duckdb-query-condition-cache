@@ -16,6 +16,7 @@
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -26,6 +27,22 @@
 #include "query_condition_cache_state.hpp"
 
 namespace duckdb {
+
+void NormalizeExpressionForKey(Expression &expr) {
+	// Recursively normalize children first
+	ExpressionIterator::EnumerateChildren(expr, [](Expression &child) { NormalizeExpressionForKey(child); });
+
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+		return;
+	}
+	auto &comp = expr.Cast<BoundComparisonExpression>();
+	// If left side is foldable (constant) and right side is not, swap them
+	if (comp.left->IsFoldable() && !comp.right->IsFoldable()) {
+		std::swap(comp.left, comp.right);
+		comp.type = FlipComparisonExpression(comp.type);
+	}
+}
+
 namespace {
 
 // ------- condition_cache_build(table_name VARCHAR, predicate VARCHAR) -------
@@ -277,6 +294,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	physical_index_set_t bound_columns;
 	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
 	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
+	NormalizeExpressionForKey(*bound_expr);
 
 	// Bound expression ToString() normalizes whitespace and formatting for cache key
 	string bound_expr_str = bound_expr->ToString();
@@ -339,6 +357,7 @@ unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFun
 		physical_index_set_t bound_columns;
 		CheckBinder check_binder(*binder, context, qname.name, table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
+		NormalizeExpressionForKey(*bound_expr);
 		result->canonical_key = bound_expr->ToString();
 	}
 
