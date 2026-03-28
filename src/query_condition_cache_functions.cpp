@@ -17,6 +17,7 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -28,18 +29,30 @@
 
 namespace duckdb {
 
+// Comparison flip replicates ComparisonSimplificationRule::Apply()
+// (duckdb/src/optimizer/rule/comparison_simplification.cpp) since
+// ExpressionRewriter runs after our pre-optimize pass.
+// Bottom-up: normalize children before sorting conjunction children.
 void NormalizeExpressionForKey(Expression &expr) {
-	// Recursively normalize children first
 	ExpressionIterator::EnumerateChildren(expr, [](Expression &child) { NormalizeExpressionForKey(child); });
 
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+	// Normalize comparison operand order
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
+		auto &comp = expr.Cast<BoundComparisonExpression>();
+		if (comp.left->IsFoldable() && !comp.right->IsFoldable()) {
+			std::swap(comp.left, comp.right);
+			comp.type = FlipComparisonExpression(comp.type);
+		}
 		return;
 	}
-	auto &comp = expr.Cast<BoundComparisonExpression>();
-	// If left side is foldable (constant) and right side is not, swap them
-	if (comp.left->IsFoldable() && !comp.right->IsFoldable()) {
-		std::swap(comp.left, comp.right);
-		comp.type = FlipComparisonExpression(comp.type);
+
+	// Sort conjunction children for canonical ordering
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		auto &conj = expr.Cast<BoundConjunctionExpression>();
+		sort(conj.children.begin(), conj.children.end(),
+		     [](const unique_ptr<Expression> &a, const unique_ptr<Expression> &b) {
+			     return a->ToString() < b->ToString();
+		     });
 	}
 }
 

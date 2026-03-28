@@ -99,6 +99,30 @@ TEST_CASE("NormalizeExpressionForKey - comparison operand order", "[normalize]")
 		auto key2 = NormalizedKey(context, table_entry, "'hello' = name");
 		REQUIRE(key1 == key2);
 	}
+
+	SECTION("OR children are sorted") {
+		auto key1 = NormalizedKey(context, table_entry, "val = 42 OR val = 99");
+		auto key2 = NormalizedKey(context, table_entry, "val = 99 OR val = 42");
+		REQUIRE(key1 == key2);
+	}
+
+	SECTION("AND children are sorted") {
+		auto key1 = NormalizedKey(context, table_entry, "val = 42 AND id < 100");
+		auto key2 = NormalizedKey(context, table_entry, "id < 100 AND val = 42");
+		REQUIRE(key1 == key2);
+	}
+
+	SECTION("nested AND inside OR is normalized") {
+		auto key1 = NormalizedKey(context, table_entry, "(val = 42 AND id < 100) OR val = 99");
+		auto key2 = NormalizedKey(context, table_entry, "val = 99 OR (id < 100 AND val = 42)");
+		REQUIRE(key1 == key2);
+	}
+
+	SECTION("reversed comparisons inside OR are normalized") {
+		auto key1 = NormalizedKey(context, table_entry, "val = 42 OR val = 99");
+		auto key2 = NormalizedKey(context, table_entry, "99 = val OR 42 = val");
+		REQUIRE(key1 == key2);
+	}
 }
 
 } // namespace duckdb

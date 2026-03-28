@@ -38,8 +38,7 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	if (!IsSettingEnabled(input.context)) {
 		return;
 	}
-	auto query_state =
-	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>("qcc_optimizer_state");
+	auto query_state = input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>("qcc_optimizer_state");
 	query_state->cache_apply_pending.clear();
 	try {
 		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
@@ -185,8 +184,7 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 
 // TODO: Implement PostOptimizeWalk + InjectCacheFilter to inject cache filters
 // into LogicalGet nodes using cache_apply_pending entries.
-void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input,
-                                                     unique_ptr<LogicalOperator> &plan) {
+void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 }
 
 } // namespace duckdb
