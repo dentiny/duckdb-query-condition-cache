@@ -4,6 +4,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
@@ -74,6 +75,30 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	CacheEntryStats ComputeStats(idx_t total_rows) const;
 };
 
+// Per-table index stored in ObjectCache (non-evictable). Tracks which
+// filter_keys have cache entries for a given table, enabling fast
+// invalidation lookup when DML modifies the table.
+struct TableFilterKeyIndex : public ObjectCacheEntry {
+	mutex lock;
+	vector<string> filter_keys;
+
+	static string ObjectType() {
+		return "query_condition_cache_filter_key_index";
+	}
+
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	void Add(const string &filter_key);
+	void Remove(const string &filter_key);
+	vector<string> GetAll();
+};
+
 // Stored in DuckDB's per-database ObjectCache
 class ConditionCacheStore : public ObjectCacheEntry {
 public:
@@ -97,12 +122,21 @@ public:
 	// Upsert an entry
 	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
+	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
+	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
+	                              const unordered_set<idx_t> &row_group_indices);
+
+	// Check if any entries exist for a given table OID
+	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
+
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:
 	// Generate a unique cache key string from CacheKey
 	static string MakeCacheKeyString(const CacheKey &key);
+	// Generate a unique filter key index key from table OID
+	static string MakeFilterKeyIndexKey(idx_t table_oid);
 };
 
 } // namespace duckdb
