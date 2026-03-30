@@ -2,9 +2,10 @@
 
 #include "query_condition_cache_extension.hpp"
 
-#include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/config.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+#include "query_condition_cache_filter.hpp"
 #include "query_condition_cache_functions.hpp"
 
 namespace duckdb {
@@ -21,6 +22,12 @@ void EnableQueryConditionCacheCallback(ClientContext &context, SetScope scope, V
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheBuildFunction());
 	loader.RegisterFunction(ConditionCacheInfoFunction());
+
+	// Register the internal filter function so it survives plan serialization/verification
+	ScalarFunction cache_filter_func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
+	                                 LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn,
+	                                 ConditionCacheFilterBind, nullptr, nullptr, ConditionCacheFilterInit);
+	loader.RegisterFunction(cache_filter_func);
 
 	// Register extension settings
 	auto &db_instance = loader.GetDatabaseInstance();
