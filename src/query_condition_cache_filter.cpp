@@ -33,8 +33,11 @@ unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, 
 }
 
 void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &result) {
+	D_ASSERT(args.size() > 0);
+	D_ASSERT(args.ColumnCount() > 0);
 	auto &bind_data = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<ConditionCacheFilterBindData>();
 	auto &entry = *bind_data.cache_entry;
+	lock_guard<mutex> guard(entry.lock);
 
 	auto &input_vec = args.data[0];
 
@@ -63,6 +66,7 @@ CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, shar
 }
 
 FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &stats) const {
+	lock_guard<mutex> guard(cache_entry->lock);
 	if (!NumericStats::HasMinMax(stats)) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}

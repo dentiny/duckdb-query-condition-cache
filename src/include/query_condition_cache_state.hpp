@@ -57,6 +57,7 @@ struct CacheEntryStats {
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
+	mutex lock;
 	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
 
 	static string ObjectType() {
