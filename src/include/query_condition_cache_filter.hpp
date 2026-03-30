@@ -25,9 +25,6 @@ struct ConditionCacheFilterBindData : public FunctionData {
 unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, ScalarFunction &bound_function,
                                                   vector<unique_ptr<Expression>> &arguments);
 
-// Per-thread local state (placeholder for future use)
-struct ConditionCacheFilterState : public FunctionLocalState {};
-
 unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, const BoundFunctionExpression &expr,
                                                         FunctionData *bind_data);
 
