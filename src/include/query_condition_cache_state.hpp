@@ -4,6 +4,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
@@ -97,12 +98,21 @@ public:
 	// Upsert an entry
 	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
+	// Remove all cached condition entries from the object cache
+	void ClearAll(ClientContext &context);
+
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
+
+	// Check whether the query condition cache is enabled for this context
+	static bool IsEnabled(ClientContext &context);
 
 private:
 	// Generate a unique cache key string from CacheKey
 	static string MakeCacheKeyString(const CacheKey &key);
+
+	mutex store_mutex;
+	unordered_set<string> tracked_keys;
 };
 
 } // namespace duckdb

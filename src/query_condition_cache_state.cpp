@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
@@ -98,12 +99,33 @@ void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, sh
 	}
 	auto &cache = ObjectCache::GetObjectCache(context);
 	string cache_key = MakeCacheKeyString(key);
+	{
+		const lock_guard<mutex> guard(store_mutex);
+		tracked_keys.insert(cache_key);
+	}
 	cache.Put(cache_key, std::move(entry));
+}
+
+void ConditionCacheStore::ClearAll(ClientContext &context) {
+	auto &cache = ObjectCache::GetObjectCache(context);
+	const lock_guard<mutex> guard(store_mutex);
+	for (const auto &key : tracked_keys) {
+		cache.Delete(key);
+	}
+	tracked_keys.clear();
 }
 
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	return cache.GetOrCreate<ConditionCacheStore>(CACHE_KEY);
+}
+
+bool ConditionCacheStore::IsEnabled(ClientContext &context) {
+	Value val;
+	if (context.TryGetCurrentSetting("enable_query_condition_cache", val)) {
+		return val.GetValue<bool>();
+	}
+	return true;
 }
 
 } // namespace duckdb

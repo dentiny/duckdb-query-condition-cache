@@ -1,0 +1,55 @@
+# name: test/sql/condition_cache_enable_disable.test
+# description: Test cache invalidation when enable_query_condition_cache is toggled
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+# Cache is enabled by default
+statement ok
+SET enable_query_condition_cache = true;
+
+# Build a cache entry
+query I
+SELECT status FROM condition_cache_build('t', 'val = 42');
+----
+Cache Built: 245/245 vectors, 5/5 row groups
+
+# Verify entry exists
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245
+
+# Disable the cache -- should clear all entries
+statement ok
+SET enable_query_condition_cache = false;
+
+# condition_cache_info should fail when disabled
+statement error
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+query condition cache is disabled
+
+# Re-enable the cache
+statement ok
+SET enable_query_condition_cache = true;
+
+# Previously cached entry should be gone (was cleared on disable)
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+0	0	0	0
+
+# Can build again after re-enabling
+query I
+SELECT status FROM condition_cache_build('t', 'val = 42');
+----
+Cache Built: 245/245 vectors, 5/5 row groups
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245

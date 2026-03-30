@@ -263,6 +263,11 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	}
 	gstate.done = true;
 
+	if (!ConditionCacheStore::IsEnabled(context)) {
+		throw InvalidInputException("condition_cache_build: query condition cache is disabled. "
+		                            "SET enable_query_condition_cache = true to enable.");
+	}
+
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheBuildBindData>();
 
 	auto &table_entry =
@@ -366,6 +371,11 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 		return;
 	}
 	gstate.done = true;
+
+	if (!ConditionCacheStore::IsEnabled(context)) {
+		throw InvalidInputException("condition_cache_info: query condition cache is disabled. "
+		                            "SET enable_query_condition_cache = true to enable.");
+	}
 
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheInfoBindData>();
 	CacheKey key {bind_data.table_oid, bind_data.canonical_key};
