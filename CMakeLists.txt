@@ -13,12 +13,19 @@ if(UNIX OR APPLE)
   )
 endif()
 
+if(CMAKE_CXX_COMPILER_ID_LOWER MATCHES "clang" OR CMAKE_CXX_COMPILER_LOWER
+                                                  MATCHES "clang")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wthread-safety")
+endif()
+
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/query_condition_cache_extension.cpp
+    src/query_condition_cache_filter.cpp
     src/query_condition_cache_functions.cpp
-    src/query_condition_cache_optimizer.cpp src/query_condition_cache_state.cpp)
+    src/query_condition_cache_optimizer.cpp
+    src/query_condition_cache_state.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

@@ -6,6 +6,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+#include "query_condition_cache_filter.hpp"
 #include "query_condition_cache_functions.hpp"
 #include "query_condition_cache_optimizer.hpp"
 
@@ -16,6 +17,12 @@ namespace {
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheBuildFunction());
 	loader.RegisterFunction(ConditionCacheInfoFunction());
+
+	// Register the internal filter function so it survives plan serialization/verification
+	ScalarFunction cache_filter_func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
+	                                 LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn,
+	                                 ConditionCacheFilterBind, nullptr, nullptr, ConditionCacheFilterInit);
+	loader.RegisterFunction(cache_filter_func);
 
 	// Register the use_query_condition_cache setting (default: false)
 	auto &db = loader.GetDatabaseInstance();
