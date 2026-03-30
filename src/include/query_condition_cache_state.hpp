@@ -1,7 +1,6 @@
 #pragma once
 
 #include "duckdb/common/array.hpp"
-#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/storage/object_cache.hpp"
