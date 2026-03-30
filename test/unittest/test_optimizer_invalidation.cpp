@@ -9,7 +9,7 @@
 
 namespace duckdb {
 
-TEST_CASE("Optimizer invalidation - DELETE removes affected row groups from cache", "[invalidation][optimizer]") {
+TEST_CASE("Optimizer invalidation - DELETE clears table cache", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
 	db.LoadStaticExtension<QueryConditionCacheExtension>();
 	Connection con(db);
@@ -35,19 +35,13 @@ TEST_CASE("Optimizer invalidation - DELETE removes affected row groups from cach
 	auto del_result = con.Query("DELETE FROM t WHERE id < 100");
 	REQUIRE_FALSE(del_result->HasError());
 
-	// The selective entry (only had RG0) should be fully removed
+	// DELETE-style rewrites clear all cache entries for the table.
 	auto after_del = LookupEntry(con, table_oid, "id < 3000");
 	REQUIRE(after_del == nullptr);
 
-	// The broad entry should have RG0 removed but RGs 1-4 preserved
+	// The broad entry should also be cleared.
 	auto broad_after = LookupEntry(con, table_oid, "val = 42");
-	REQUIRE(broad_after != nullptr);
-	REQUIRE(broad_after->bitvectors.size() == 4);
-	REQUIRE(broad_after->bitvectors.count(0) == 0);
-	REQUIRE(broad_after->bitvectors.count(1) == 1);
-	REQUIRE(broad_after->bitvectors.count(2) == 1);
-	REQUIRE(broad_after->bitvectors.count(3) == 1);
-	REQUIRE(broad_after->bitvectors.count(4) == 1);
+	REQUIRE(broad_after == nullptr);
 }
 
 TEST_CASE("Optimizer invalidation - UPDATE removes affected row groups from cache", "[invalidation][optimizer]") {
@@ -100,11 +94,15 @@ TEST_CASE("Optimizer invalidation - INSERT only invalidates affected row groups"
 	auto ins_result = con.Query("INSERT INTO t VALUES (999999, 0)");
 	REQUIRE_FALSE(ins_result->HasError());
 
-	// Selective entry (RG0 only) should be preserved — INSERT didn't touch RG0
+	// Selective entry preserves RG0 and the known-empty middle row groups.
 	auto selective_after = LookupEntry(con, table_oid, "id < 3000");
 	REQUIRE(selective_after != nullptr);
 	REQUIRE(selective_after->bitvectors.size() == 1);
 	REQUIRE(selective_after->bitvectors.count(0) == 1);
+	REQUIRE(selective_after->bitvectors.count(1) == 1);
+	REQUIRE(selective_after->bitvectors.count(2) == 1);
+	REQUIRE(selective_after->bitvectors.count(3) == 1);
+	REQUIRE(selective_after->bitvectors.count(4) == 0);
 
 	// Broad entry should have RG4 invalidated, RGs 0-3 preserved
 	auto broad_after = LookupEntry(con, table_oid, "val = 42");
@@ -196,7 +194,8 @@ TEST_CASE("Optimizer invalidation - cross-table isolation", "[invalidation][opti
 	REQUIRE(t1_after->bitvectors.size() == 5);
 }
 
-TEST_CASE("Optimizer invalidation - DELETE across multiple row groups", "[invalidation][optimizer]") {
+TEST_CASE("Optimizer invalidation - DELETE across multiple row groups clears table cache",
+          "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
 	db.LoadStaticExtension<QueryConditionCacheExtension>();
 	Connection con(db);
@@ -214,15 +213,9 @@ TEST_CASE("Optimizer invalidation - DELETE across multiple row groups", "[invali
 	auto del_result = con.Query("DELETE FROM t WHERE id < 100 OR (id >= 250000 AND id < 250100)");
 	REQUIRE_FALSE(del_result->HasError());
 
-	// RG0 and RG2 should be invalidated
+	// DELETE-style rewrites clear all cache entries for the table.
 	auto after = LookupEntry(con, table_oid, "val = 42");
-	REQUIRE(after != nullptr);
-	REQUIRE(after->bitvectors.size() == 3);
-	REQUIRE(after->bitvectors.count(0) == 0);
-	REQUIRE(after->bitvectors.count(1) == 1);
-	REQUIRE(after->bitvectors.count(2) == 0);
-	REQUIRE(after->bitvectors.count(3) == 1);
-	REQUIRE(after->bitvectors.count(4) == 1);
+	REQUIRE(after == nullptr);
 }
 
 TEST_CASE("Optimizer invalidation - MERGE invalidates matched and inserted row groups", "[invalidation][optimizer]") {
@@ -262,7 +255,28 @@ TEST_CASE("Optimizer invalidation - MERGE invalidates matched and inserted row g
 	REQUIRE(after->bitvectors.count(4) == 0);
 }
 
-TEST_CASE("Optimizer invalidation - TRUNCATE does not crash with stale cache", "[invalidation][optimizer]") {
+TEST_CASE("Optimizer invalidation - MERGE DELETE clears table cache", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection con(db);
+
+	con.Query("CREATE TABLE dst AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i)");
+	auto table_oid = GetTableOid(con, "dst");
+
+	BuildCache(con, "dst", "val = 42");
+	auto entry = LookupEntry(con, table_oid, "val = 42");
+	REQUIRE(entry != nullptr);
+	REQUIRE(entry->bitvectors.size() == 5);
+
+	con.Query("CREATE TABLE src (id INTEGER)");
+	con.Query("INSERT INTO src VALUES (200)");
+
+	auto merge_result = con.Query("MERGE INTO dst USING src ON dst.id = src.id WHEN MATCHED THEN DELETE");
+	REQUIRE_FALSE(merge_result->HasError());
+	REQUIRE(LookupEntry(con, table_oid, "val = 42") == nullptr);
+}
+
+TEST_CASE("Optimizer invalidation - TRUNCATE clears table cache", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
 	db.LoadStaticExtension<QueryConditionCacheExtension>();
 	Connection con(db);
@@ -275,11 +289,12 @@ TEST_CASE("Optimizer invalidation - TRUNCATE does not crash with stale cache", "
 	REQUIRE(entry != nullptr);
 	REQUIRE(entry->bitvectors.size() == 5);
 
-	// TRUNCATE removes all rows — stale cache entries remain but are harmless
+	// TRUNCATE lowers to DELETE, so the whole table cache should be cleared.
 	auto trunc_result = con.Query("TRUNCATE t");
 	REQUIRE_FALSE(trunc_result->HasError());
+	REQUIRE(LookupEntry(con, table_oid, "val = 42") == nullptr);
 
-	// Query on empty table should return 0 rows regardless of stale cache
+	// Query on empty table should still return 0 rows.
 	auto count_result = con.Query("SELECT count(*) FROM t WHERE val = 42");
 	REQUIRE_FALSE(count_result->HasError());
 	auto chunk = count_result->Fetch();
@@ -346,7 +361,7 @@ TEST_CASE("Optimizer invalidation - INSERT into partial tail row group", "[inval
 
 // --- Plan injection tests (verify optimizer injects PhysicalCacheInvalidator with correct fields) ---
 
-TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for DELETE", "[invalidation][optimizer]") {
+TEST_CASE("Optimizer invalidation - injects CLEAR_TABLE invalidator for DELETE", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
 	db.LoadStaticExtension<QueryConditionCacheExtension>();
 	Connection con(db);
@@ -358,7 +373,7 @@ TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for DELETE", "[in
 	REQUIRE_FALSE(prepared->HasError());
 	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
 	REQUIRE(invalidator);
-	REQUIRE(invalidator->mode == CacheInvalidatorMode::ROW_ID);
+	REQUIRE(invalidator->mode == CacheInvalidatorMode::CLEAR_TABLE);
 	REQUIRE(invalidator->table_oid == table_oid);
 }
 

@@ -44,6 +44,8 @@ OperatorResultType PhysicalCacheInvalidator::Execute(ExecutionContext &context, 
 	auto &invalidator_state = gstate.Cast<CacheInvalidatorGlobalState>();
 
 	switch (mode) {
+	case CacheInvalidatorMode::CLEAR_TABLE:
+		break;
 	case CacheInvalidatorMode::ROW_ID:
 		CollectRowGroups(input.data[row_id_column_index], input.size(), invalidator_state, /*track_nulls=*/false);
 		break;
@@ -65,6 +67,12 @@ OperatorFinalResultType PhysicalCacheInvalidator::OperatorFinalize(Pipeline &pip
                                                                    ClientContext &context,
                                                                    OperatorFinalizeInput &input) const {
 	auto &invalidator_state = input.global_state.Cast<CacheInvalidatorGlobalState>();
+
+	if (mode == CacheInvalidatorMode::CLEAR_TABLE) {
+		auto store = ConditionCacheStore::GetOrCreate(context);
+		store->RemoveEntriesForTable(context, table_oid);
+		return OperatorFinalResultType::FINISHED;
+	}
 
 	// For INSERT and MERGE modes: compute row groups from the inserted row range
 	if (invalidator_state.inserted_row_count > 0) {
@@ -98,6 +106,9 @@ InsertionOrderPreservingMap<string> PhysicalCacheInvalidator::ParamsToString() c
 	InsertionOrderPreservingMap<string> result;
 	result["Table OID"] = to_string(table_oid);
 	switch (mode) {
+	case CacheInvalidatorMode::CLEAR_TABLE:
+		result["Mode"] = "CLEAR_TABLE";
+		break;
 	case CacheInvalidatorMode::ROW_ID:
 		result["Mode"] = "ROW_ID";
 		result["Row ID Column"] = to_string(row_id_column_index);

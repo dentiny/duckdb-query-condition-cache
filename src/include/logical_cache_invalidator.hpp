@@ -11,7 +11,11 @@ struct LogicalCacheInvalidator : public LogicalExtensionOperator {
 	idx_t row_id_column_index;  // for ROW_ID mode
 	idx_t pre_insert_row_count; // for INSERT/MERGE modes
 
-	// For DELETE/UPDATE: pass the row_id expression to be resolved during column binding.
+	// For DELETE/TRUNCATE-style rewrites: clear the entire table cache.
+	LogicalCacheInvalidator(idx_t table_oid, CacheInvalidatorMode mode);
+
+	// For row-id-based invalidation (e.g. UPDATE): pass the row_id expression to be
+	// resolved during column binding.
 	LogicalCacheInvalidator(idx_t table_oid, unique_ptr<Expression> row_id_expr);
 
 	// For INSERT: count rows and compute affected range.

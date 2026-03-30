@@ -20,15 +20,15 @@ SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
 5
 
-# DELETE a row in RG0 should invalidate only RG0
+# DELETE is treated as a delete-like rewrite, so the whole table cache is cleared
 statement ok
 DELETE FROM t WHERE id = 42;
 
-# Only 4 row groups remain cached (RG0 invalidated)
+# No cache entry remains for this predicate
 query I
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-4
+0
 
 # Rebuild restores all 5 row groups
 query I
@@ -57,7 +57,7 @@ SELECT status FROM condition_cache_build('t', 'val = 42');
 Cache Built: 245/245 vectors, 5/5 row groups
 
 # INSERT appends to the last row group — only that RG is invalidated
-# Build a predicate that only hits RG0
+# Build a predicate that only matches RG0, but caches all row groups
 query I
 SELECT status FROM condition_cache_build('t', 'id < 3000');
 ----
@@ -71,7 +71,8 @@ SELECT * FROM condition_cache_info('t', 'id < 3000');
 statement ok
 INSERT INTO t VALUES (999999, 0);
 
-# RG0 cache (for 'id < 3000') should be preserved since insert only affects the last RG
+# The known-empty last row group is invalidated, but RG0 and the other known-empty
+# row groups remain cached
 query I
 SELECT * FROM condition_cache_info('t', 'id < 3000');
 ----
@@ -109,7 +110,7 @@ SELECT * FROM condition_cache_info('t2', 'val = 5');
 0
 
 # ============================================================================
-# TRUNCATE should not crash and stale entries should be harmless
+# TRUNCATE should clear the table cache and remain correct
 # ============================================================================
 
 statement ok
@@ -128,8 +129,13 @@ SELECT * FROM condition_cache_info('t_trunc', 'val = 42');
 statement ok
 TRUNCATE t_trunc;
 
-# After truncate, cache entry may still exist but queries must still be correct
-# (empty table returns 0 rows regardless of stale cache)
+# Cache entry is cleared
+query I
+SELECT * FROM condition_cache_info('t_trunc', 'val = 42');
+----
+0
+
+# Empty table still returns 0 rows
 query I
 SELECT count(*) FROM t_trunc WHERE val = 42;
 ----
@@ -158,3 +164,36 @@ query I
 SELECT count(*) FROM t_drop WHERE val = 5;
 ----
 100
+
+# ============================================================================
+# CHECKPOINT vacuum must not leave stale cache entries that prune moved rows
+# ============================================================================
+
+statement ok
+SET use_query_condition_cache = true;
+
+statement ok
+CREATE TABLE t_checkpoint AS
+SELECT i AS id, CASE WHEN i >= 245760 THEN 1 ELSE 0 END AS val
+FROM range(368640) t(i);
+
+query I
+SELECT status FROM condition_cache_build('t_checkpoint', 'val=1');
+----
+Cache Built: 60/180 vectors, 1/3 row groups
+
+query I
+SELECT count(*) FROM t_checkpoint WHERE val = 1;
+----
+122880
+
+statement ok
+DELETE FROM t_checkpoint WHERE id < 122880;
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM t_checkpoint WHERE val = 1;
+----
+122880

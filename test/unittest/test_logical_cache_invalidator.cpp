@@ -5,6 +5,16 @@
 
 namespace duckdb {
 
+TEST_CASE("LogicalCacheInvalidator - CLEAR_TABLE mode constructor", "[logical_invalidator]") {
+	LogicalCacheInvalidator op(7, CacheInvalidatorMode::CLEAR_TABLE);
+
+	REQUIRE(op.table_oid == 7);
+	REQUIRE(op.mode == CacheInvalidatorMode::CLEAR_TABLE);
+	REQUIRE(op.row_id_column_index == 0);
+	REQUIRE(op.pre_insert_row_count == 0);
+	REQUIRE(op.expressions.empty());
+}
+
 TEST_CASE("LogicalCacheInvalidator - ROW_ID mode constructor", "[logical_invalidator]") {
 	auto row_id_expr = make_uniq<BoundReferenceExpression>(LogicalType::BIGINT, 3);
 	LogicalCacheInvalidator op(42, std::move(row_id_expr));

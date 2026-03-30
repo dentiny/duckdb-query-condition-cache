@@ -116,6 +116,9 @@ public:
 	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
 	                              const unordered_set<idx_t> &row_group_indices);
 
+	// Remove all cache entries for a table. Returns count of entries removed.
+	idx_t RemoveEntriesForTable(ClientContext &context, idx_t table_oid);
+
 	// Check if any entries exist for a given table OID
 	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
 
