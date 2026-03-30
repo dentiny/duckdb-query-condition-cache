@@ -45,5 +45,16 @@ TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 		REQUIRE(bv.VectorHasRows(5));
 		REQUIRE_FALSE(bv.VectorHasRows(6));
 	}
+
+	SECTION("merge combines matching vectors") {
+		RowGroupFilter lhs({2});
+		RowGroupFilter rhs({5});
+
+		lhs.MergeFrom(rhs);
+
+		REQUIRE(lhs.VectorHasRows(2));
+		REQUIRE(lhs.VectorHasRows(5));
+		REQUIRE_FALSE(lhs.VectorHasRows(3));
+	}
 }
 } // namespace duckdb

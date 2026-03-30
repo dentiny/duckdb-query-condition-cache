@@ -64,6 +64,26 @@ TEST_CASE("RemoveRowGroupsForTable - basic operations", "[invalidation]") {
 		REQUIRE(found2->bitvectors.count(0) == 1);
 	}
 
+	SECTION("removes all entries for a table") {
+		auto entry1 = make_shared_ptr<ConditionCacheEntry>();
+		entry1->bitvectors[0];
+		store->Upsert(context, {1, "val > 5"}, entry1);
+
+		auto entry2 = make_shared_ptr<ConditionCacheEntry>();
+		entry2->bitvectors[0].SetVector(0);
+		store->Upsert(context, {1, "val < 10"}, entry2);
+
+		auto entry3 = make_shared_ptr<ConditionCacheEntry>();
+		entry3->bitvectors[0].SetVector(0);
+		store->Upsert(context, {2, "val = 42"}, entry3);
+
+		auto removed = store->RemoveEntriesForTable(context, 1);
+		REQUIRE(removed == 2);
+		REQUIRE(store->Lookup(context, {1, "val > 5"}) == nullptr);
+		REQUIRE(store->Lookup(context, {1, "val < 10"}) == nullptr);
+		REQUIRE(store->Lookup(context, {2, "val = 42"}) != nullptr);
+	}
+
 	SECTION("removes from multiple entries for the same table") {
 		auto entry1 = make_shared_ptr<ConditionCacheEntry>();
 		entry1->bitvectors[0].SetVector(0);

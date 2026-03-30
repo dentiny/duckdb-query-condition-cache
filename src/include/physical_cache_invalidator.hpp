@@ -5,8 +5,10 @@
 namespace duckdb {
 
 enum class CacheInvalidatorMode : uint8_t {
-	// DELETE/UPDATE: observe row IDs at row_id_column_index
+	// UPDATE-style invalidation: observe row IDs at row_id_column_index
 	ROW_ID,
+	// DELETE/TRUNCATE: clear all cache entries for the table
+	CLEAR_TABLE,
 	// INSERT: count rows and compute affected range from pre_insert_row_count
 	INSERT,
 	// MERGE: hybrid — track row IDs for matched rows (UPDATE/DELETE) and count

@@ -19,6 +19,17 @@ CacheInvalidationOptimizer::CacheInvalidationOptimizer() {
 	optimize_function = OptimizeFunction;
 }
 
+static bool MergeCanRewriteRowGroups(const LogicalMergeInto &merge) {
+	for (const auto &entry : merge.actions) {
+		for (const auto &action : entry.second) {
+			if (action->action_type == MergeActionType::MERGE_DELETE || action->update_is_del_and_insert) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_ptr<LogicalOperator> &op) {
 	// Recurse into children first
 	for (auto &child : op->children) {
@@ -30,10 +41,7 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 		auto &del = op->Cast<LogicalDelete>();
 		auto table_oid = del.table.oid;
 
-		// Copy the row_id expression; it will be resolved during column binding resolution
-		auto row_id_expr = del.expressions[0]->Copy();
-
-		auto invalidator = make_uniq<LogicalCacheInvalidator>(table_oid, std::move(row_id_expr));
+		auto invalidator = make_uniq<LogicalCacheInvalidator>(table_oid, CacheInvalidatorMode::CLEAR_TABLE);
 		invalidator->children = std::move(del.children);
 		del.children.clear();
 		del.children.push_back(std::move(invalidator));
@@ -72,9 +80,13 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 		auto &duck_table = merge.table.Cast<DuckTableEntry>();
 		auto pre_insert_rows = duck_table.GetStorage().GetTotalRows();
 
-		auto row_id_col = merge.row_id_start;
-
-		auto invalidator = make_uniq<LogicalCacheInvalidator>(table_oid, row_id_col, pre_insert_rows);
+		unique_ptr<LogicalCacheInvalidator> invalidator;
+		if (MergeCanRewriteRowGroups(merge)) {
+			invalidator = make_uniq<LogicalCacheInvalidator>(table_oid, CacheInvalidatorMode::CLEAR_TABLE);
+		} else {
+			auto row_id_col = merge.row_id_start;
+			invalidator = make_uniq<LogicalCacheInvalidator>(table_oid, row_id_col, pre_insert_rows);
+		}
 		invalidator->children = std::move(merge.children);
 		merge.children.clear();
 		merge.children.push_back(std::move(invalidator));

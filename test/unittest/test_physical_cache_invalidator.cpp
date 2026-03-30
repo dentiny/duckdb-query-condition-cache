@@ -36,7 +36,7 @@ TEST_CASE("PhysicalCacheInvalidator - ParamsToString contains mode and table OID
 	REQUIRE(invalidator);
 	auto params = invalidator->ParamsToString();
 	REQUIRE(params["Table OID"] == to_string(table_oid));
-	REQUIRE(params["Mode"] == "ROW_ID");
+	REQUIRE(params["Mode"] == "CLEAR_TABLE");
 }
 
 TEST_CASE("PhysicalCacheInvalidator - ParallelOperator returns true", "[physical_invalidator]") {

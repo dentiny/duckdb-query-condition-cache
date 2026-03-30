@@ -7,7 +7,11 @@
 
 namespace duckdb {
 
-// DELETE/UPDATE mode: row_id expression stored in expressions[0], resolved during column binding
+LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid, CacheInvalidatorMode mode)
+    : table_oid(table_oid), mode(mode), row_id_column_index(0), pre_insert_row_count(0) {
+}
+
+// Row-id mode: row_id expression stored in expressions[0], resolved during column binding
 LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid, unique_ptr<Expression> row_id_expr)
     : table_oid(table_oid), mode(CacheInvalidatorMode::ROW_ID), row_id_column_index(0), pre_insert_row_count(0) {
 	expressions.push_back(std::move(row_id_expr));
@@ -88,6 +92,9 @@ unique_ptr<LogicalExtensionOperator> CacheInvalidatorOperatorExtension::Deserial
 
 	unique_ptr<LogicalCacheInvalidator> result;
 	switch (mode) {
+	case CacheInvalidatorMode::CLEAR_TABLE:
+		result = make_uniq<LogicalCacheInvalidator>(oid, mode);
+		break;
 	case CacheInvalidatorMode::ROW_ID: {
 		unique_ptr<Expression> row_id_expr;
 		if (!exprs.empty()) {
