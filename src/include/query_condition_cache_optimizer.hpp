@@ -7,11 +7,14 @@
 
 namespace duckdb {
 
+class DuckTableEntry;
 class LogicalGet;
 
 // Query-scoped state for passing cache entries between pre-optimize and post-optimize phases.
 // Stored in ClientContext::registered_state; automatically cleared on QueryEnd.
 struct CacheOptimizerQueryState : public ClientContextState {
+	static constexpr const char *NAME = "qcc_optimizer_state";
+
 	// Maps table_index -> cache entry for tables matched during pre-optimize.
 	// Consumed by post-optimize to inject cache filters.
 	unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> cache_apply_pending;
@@ -47,6 +50,9 @@ private:
 	// Build cache entry for a predicate on a table
 	static shared_ptr<ConditionCacheEntry>
 	BuildCacheForPredicate(ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get);
+
+	// Reconstruct SQL from filter expressions, sort for alphabetical ordering
+	static string ReconstructPredicateSQL(const vector<unique_ptr<Expression>> &expressions);
 };
 
 } // namespace duckdb

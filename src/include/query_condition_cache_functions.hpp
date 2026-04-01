@@ -9,12 +9,6 @@ namespace duckdb {
 class DuckTableEntry;
 class Expression;
 
-// Normalize a bound expression tree in-place for canonical cache key generation.
-// Ensures equivalent predicates produce the same ToString() output:
-//   - Comparison operands: constants moved to the right ("42 = val" → "val = 42")
-//   - Conjunction children (AND/OR): sorted by ToString() ("b = 2 OR a = 1" -> "a = 1 OR b = 2")
-void NormalizeExpressionForKey(Expression &expr);
-
 // TODO: Exposed for future reuse and C++ unit testing.
 // Scan all rows in the table, evaluate bound_expr, and build a ConditionCacheEntry
 // recording which vectors contain qualifying rows.

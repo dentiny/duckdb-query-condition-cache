@@ -24,11 +24,11 @@ void LoadInternal(ExtensionLoader &loader) {
 	                                 ConditionCacheFilterBind, nullptr, nullptr, ConditionCacheFilterInit);
 	loader.RegisterFunction(cache_filter_func);
 
-	// Register the use_query_condition_cache setting (default: false)
+	// Register the use_query_condition_cache setting (default: true)
 	auto &db = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(db);
 	config.AddExtensionOption("use_query_condition_cache", "Enable automatic query condition cache build and apply",
-	                          LogicalType {LogicalTypeId::BOOLEAN}, Value::BOOLEAN(false));
+	                          LogicalType {LogicalTypeId::BOOLEAN}, Value::BOOLEAN(true));
 
 	// Register optimizer extension
 	OptimizerExtension::Register(config, QueryConditionCacheOptimizer());

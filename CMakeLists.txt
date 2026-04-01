@@ -21,6 +21,7 @@ endif()
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
+    src/predicate_key_utils.cpp
     src/query_condition_cache_extension.cpp
     src/query_condition_cache_filter.cpp
     src/query_condition_cache_functions.cpp

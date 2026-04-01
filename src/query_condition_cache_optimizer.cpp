@@ -1,5 +1,6 @@
 #include "query_condition_cache_optimizer.hpp"
 
+#include "predicate_key_utils.hpp"
 #include "query_condition_cache_functions.hpp"
 #include "query_condition_cache_state.hpp"
 
@@ -7,10 +8,7 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/parser/parser.hpp"
-#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
-#include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
@@ -38,15 +36,10 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	if (!IsSettingEnabled(input.context)) {
 		return;
 	}
-	auto query_state = input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>("qcc_optimizer_state");
+	auto query_state =
+	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
 	query_state->cache_apply_pending.clear();
-	try {
-		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
-	} catch (...) {
-		// If anything goes wrong, clear pending entries and let the query
-		// proceed without cache optimization
-		query_state->cache_apply_pending.clear();
-	}
+	PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
 }
 
 void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
@@ -84,15 +77,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 		return;
 	}
 
-	auto &duck_table = table->Cast<DuckTableEntry>();
-	auto &storage = duck_table.GetStorage();
-
-	// Skip caching for tables with indexes — index scans are typically more efficient
-	if (storage.HasIndexes()) {
-		return;
-	}
-
-	// Compute canonical key using parse+bind normalization (same format as condition_cache_build/info)
+	// TODO: Use std::optional when DuckDB upgrades to C++17 in v2.0
 	auto key = ComputePredicateKey(context, table->oid, filter.expressions, get);
 	if (key.filter_key.empty()) {
 		return;
@@ -102,7 +87,8 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	auto entry = store->Lookup(context, key);
 
 	if (!entry) {
-		// Cache miss: build cache inline
+		// TODO: Consider building cache in the background and syncing later
+		// to avoid blocking the first query.
 		entry = BuildCacheForPredicate(context, filter.expressions, get);
 		if (entry) {
 			store->Upsert(context, key, entry);
@@ -114,6 +100,17 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	}
 }
 
+// Reconstruct SQL from filter expressions, sort for alphabetical ordering.
+string QueryConditionCacheOptimizer::ReconstructPredicateSQL(const vector<unique_ptr<Expression>> &expressions) {
+	vector<string> parts;
+	parts.reserve(expressions.size());
+	for (const auto &expr : expressions) {
+		parts.push_back(expr->ToString());
+	}
+	sort(parts.begin(), parts.end());
+	return StringUtil::Join(parts, " AND ");
+}
+
 CacheKey QueryConditionCacheOptimizer::ComputePredicateKey(ClientContext &context, idx_t table_oid,
                                                            const vector<unique_ptr<Expression>> &expressions,
                                                            LogicalGet &get) {
@@ -121,30 +118,9 @@ CacheKey QueryConditionCacheOptimizer::ComputePredicateKey(ClientContext &contex
 	if (!table_ptr) {
 		return CacheKey {table_oid, ""};
 	}
-	auto &table_entry = table_ptr->Cast<DuckTableEntry>();
-
-	// Reconstruct SQL from expressions, sort for canonical ordering
-	vector<string> parts;
-	parts.reserve(expressions.size());
-	for (const auto &expr : expressions) {
-		parts.push_back(expr->ToString());
-	}
-	sort(parts.begin(), parts.end());
-	string predicate_sql = StringUtil::Join(parts, " AND ");
-
-	// Parse and bind to produce the same normalized key as condition_cache_build/info
-	auto parsed_exprs = Parser::ParseExpressionList(predicate_sql);
-	if (parsed_exprs.empty()) {
-		return CacheKey {table_oid, ""};
-	}
-
-	auto binder = Binder::CreateBinder(context);
-	physical_index_set_t bound_columns;
-	CheckBinder check_binder(*binder, context, table_entry.name, table_entry.GetColumns(), bound_columns);
-	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
-	NormalizeExpressionForKey(*bound_expr);
-
-	return CacheKey {table_oid, bound_expr->ToString()};
+	string predicate_sql = ReconstructPredicateSQL(expressions);
+	string canonical = ComputeCanonicalPredicateKey(context, table_ptr->Cast<DuckTableEntry>(), predicate_sql);
+	return CacheKey {table_oid, std::move(canonical)};
 }
 
 shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredicate(
@@ -153,27 +129,12 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 	if (!table_ptr) {
 		return nullptr;
 	}
-
 	auto &table_entry = table_ptr->Cast<DuckTableEntry>();
-
-	// Reconstruct predicate SQL from the bound expressions
-	vector<string> parts;
-	parts.reserve(expressions.size());
-	for (const auto &expr : expressions) {
-		parts.push_back(expr->ToString());
-	}
-	string predicate_sql = StringUtil::Join(parts, " AND ");
-
-	// Parse, bind, and build cache entry (same flow as condition_cache_build)
-	auto parsed_exprs = Parser::ParseExpressionList(predicate_sql);
-	if (parsed_exprs.empty()) {
+	string predicate_sql = ReconstructPredicateSQL(expressions);
+	auto bound_expr = BindPredicate(context, table_entry, predicate_sql);
+	if (!bound_expr) {
 		return nullptr;
 	}
-
-	auto binder = Binder::CreateBinder(context);
-	physical_index_set_t bound_columns;
-	CheckBinder check_binder(*binder, context, table_entry.name, table_entry.GetColumns(), bound_columns);
-	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
 	// CheckBinder sets target_type = INTEGER, re-cast to BOOLEAN
 	bound_expr =

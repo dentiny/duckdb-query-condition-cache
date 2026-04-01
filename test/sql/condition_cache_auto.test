@@ -7,17 +7,7 @@ require query_condition_cache
 statement ok
 CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
 
-# Cache disabled by default
-query IIII
-SELECT * FROM condition_cache_info('t', 'val = 42');
-----
-0	0	0	0
-
-# Enable auto cache
-statement ok
-SET use_query_condition_cache = true;
-
-# Query triggers auto cache build
+# Cache enabled by default, query triggers auto cache build
 statement ok
 SELECT count(*) FROM t WHERE val = 42;
 
