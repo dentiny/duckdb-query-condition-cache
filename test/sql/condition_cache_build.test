@@ -62,6 +62,18 @@ SELECT * FROM condition_cache_build('bad_catalog.main.t', 'val = 42');
 ----
 Catalog "bad_catalog" does not exist
 
+# Empty predicate throws error
+statement error
+SELECT * FROM condition_cache_build('t', '');
+----
+failed to parse predicate
+
+# Whitespace-only predicate throws error
+statement error
+SELECT * FROM condition_cache_build('t', '   ');
+----
+failed to parse predicate
+
 # Non-castable column as predicate throws error
 statement ok
 CREATE TABLE t_str AS SELECT 'hello' AS name;

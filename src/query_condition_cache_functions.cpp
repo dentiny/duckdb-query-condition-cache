@@ -1,5 +1,7 @@
 #include "query_condition_cache_functions.hpp"
 
+#include "predicate_key_utils.hpp"
+
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/common/allocator.hpp"
@@ -18,7 +20,6 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
-#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
@@ -268,19 +269,12 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	auto &table_entry =
 	    Catalog::GetEntry<DuckTableEntry>(context, bind_data.catalog, bind_data.schema, bind_data.table);
 
-	// Parse predicate SQL and bind column references to table columns
-	auto parsed_exprs = Parser::ParseExpressionList(bind_data.predicate_sql);
-	if (parsed_exprs.empty()) {
+	string canonical_key = ComputeCanonicalPredicateKey(context, table_entry, bind_data.predicate_sql);
+	if (canonical_key.empty()) {
 		throw InvalidInputException("condition_cache_build: failed to parse predicate");
 	}
-	auto binder = Binder::CreateBinder(context);
-	physical_index_set_t bound_columns;
-	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
-	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-	// Bound expression ToString() normalizes whitespace and formatting for cache key
-	string bound_expr_str = bound_expr->ToString();
-
+	auto bound_expr = BindPredicate(context, table_entry, bind_data.predicate_sql);
 	// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN for SelectExpression.
 	bound_expr =
 	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
@@ -288,8 +282,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 	auto stats = entry->ComputeStats(bind_data.total_rows);
 
-	// TODO: Invalidate cache on table modification (INSERT/DELETE/UPDATE/VACUUM)
-	CacheKey key {bind_data.table_oid, std::move(bound_expr_str)};
+	CacheKey key {bind_data.table_oid, std::move(canonical_key)};
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	store->Upsert(context, key, std::move(entry));
 
@@ -332,15 +325,7 @@ unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFun
 	result->table_oid = table_entry.oid;
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
 
-	// Parse and bind predicate to produce a canonical key
-	auto parsed_exprs = Parser::ParseExpressionList(predicate_sql);
-	if (!parsed_exprs.empty()) {
-		auto binder = Binder::CreateBinder(context);
-		physical_index_set_t bound_columns;
-		CheckBinder check_binder(*binder, context, qname.name, table_entry.GetColumns(), bound_columns);
-		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
-		result->canonical_key = bound_expr->ToString();
-	}
+	result->canonical_key = ComputeCanonicalPredicateKey(context, table_entry, predicate_sql);
 
 	names.reserve(4);
 	return_types.reserve(4);

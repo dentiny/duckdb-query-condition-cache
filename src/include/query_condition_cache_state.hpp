@@ -1,7 +1,10 @@
 #pragma once
 
+#include "concurrency/annotated_lock.hpp"
+#include "concurrency/annotated_mutex.hpp"
+#include "concurrency/thread_annotation.hpp"
+
 #include "duckdb/common/array.hpp"
-#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -58,7 +61,8 @@ struct CacheEntryStats {
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
-	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
+	concurrency::mutex lock;
+	unordered_map<idx_t, RowGroupFilter> bitvectors DUCKDB_GUARDED_BY(lock); // rg_idx -> bitvector
 
 	static string ObjectType() {
 		return "query_condition_cache_entry";

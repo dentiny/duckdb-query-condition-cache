@@ -4,7 +4,7 @@
 #include "duckdb/common/exception.hpp"
 #include "test_helpers.hpp"
 
-using namespace duckdb;
+namespace duckdb {
 
 TEST_CASE("ConditionCacheStore - basic operations", "[cache_store]") {
 	DuckDB db;
@@ -58,3 +58,5 @@ TEST_CASE("ConditionCacheStore - basic operations", "[cache_store]") {
 		REQUIRE_THROWS_AS(store->Upsert(context, {1, "col:>5"}, nullptr), InvalidInputException);
 	}
 }
+
+} // namespace duckdb
