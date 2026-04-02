@@ -82,7 +82,7 @@ CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
 // ------- TABLE_FILTER_KEY_INDEX -------
 
 void TableFilterKeyIndex::Add(const string &filter_key) {
-	lock_guard<mutex> guard(lock);
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	for (const auto &existing : filter_keys) {
 		if (existing == filter_key) {
 			return;
@@ -92,7 +92,7 @@ void TableFilterKeyIndex::Add(const string &filter_key) {
 }
 
 void TableFilterKeyIndex::Remove(const string &filter_key) {
-	lock_guard<mutex> guard(lock);
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	for (auto it = filter_keys.begin(); it != filter_keys.end(); ++it) {
 		if (*it == filter_key) {
 			filter_keys.erase(it);
@@ -102,7 +102,7 @@ void TableFilterKeyIndex::Remove(const string &filter_key) {
 }
 
 vector<string> TableFilterKeyIndex::GetAll() {
-	lock_guard<mutex> guard(lock);
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return filter_keys;
 }
 
@@ -132,6 +132,10 @@ void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, sh
 	// Maintain per-table index for invalidation lookup
 	auto index = cache.GetOrCreate<TableFilterKeyIndex>(MakeFilterKeyIndexKey(key.table_oid));
 	index->Add(key.filter_key);
+
+	// Track table OID for ClearAll
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	cached_table_oids.insert(key.table_oid);
 }
 
 idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
@@ -171,6 +175,24 @@ bool ConditionCacheStore::HasEntriesForTable(ClientContext &context, idx_t table
 	auto &cache = ObjectCache::GetObjectCache(context);
 	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
 	return index && !index->GetAll().empty();
+}
+
+void ConditionCacheStore::ClearAll(ClientContext &context) {
+	auto &cache = ObjectCache::GetObjectCache(context);
+
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	for (auto table_oid : cached_table_oids) {
+		auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
+		if (!index) {
+			continue;
+		}
+		auto filter_keys = index->GetAll();
+		for (const auto &filter_key : filter_keys) {
+			cache.Delete(MakeCacheKeyString(CacheKey {table_oid, filter_key}));
+		}
+		cache.Delete(MakeFilterKeyIndexKey(table_oid));
+	}
+	cached_table_oids.clear();
 }
 
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {

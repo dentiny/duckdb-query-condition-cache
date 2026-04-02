@@ -83,8 +83,8 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 // filter_keys have cache entries for a given table, enabling fast
 // invalidation lookup when DML modifies the table.
 struct TableFilterKeyIndex : public ObjectCacheEntry {
-	mutex lock;
-	vector<string> filter_keys;
+	concurrency::mutex lock;
+	vector<string> filter_keys DUCKDB_GUARDED_BY(lock);
 
 	static string ObjectType() {
 		return "query_condition_cache_filter_key_index";
@@ -133,13 +133,18 @@ public:
 	// Check if any entries exist for a given table OID
 	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
 
+	// Clear all cache entries and filter key indexes
+	void ClearAll(ClientContext &context);
+
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:
-	// Generate a unique cache key string from CacheKey
+	concurrency::mutex lock;
+	// Tracks all table OIDs that have been cached, for ClearAll
+	unordered_set<idx_t> cached_table_oids DUCKDB_GUARDED_BY(lock);
+
 	static string MakeCacheKeyString(const CacheKey &key);
-	// Generate a unique filter key index key from table OID
 	static string MakeFilterKeyIndexKey(idx_t table_oid);
 };
 

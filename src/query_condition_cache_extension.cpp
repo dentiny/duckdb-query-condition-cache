@@ -9,10 +9,19 @@
 #include "query_condition_cache_filter.hpp"
 #include "query_condition_cache_functions.hpp"
 #include "query_condition_cache_optimizer.hpp"
+#include "query_condition_cache_state.hpp"
 
 namespace duckdb {
 
 namespace {
+
+// Clear all cache entries when the setting is disabled
+void OnQueryConditionCacheSettingChange(ClientContext &context, SetScope scope, Value &parameter) {
+	if (!parameter.GetValue<bool>()) {
+		auto store = ConditionCacheStore::GetOrCreate(context);
+		store->ClearAll(context);
+	}
+}
 
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheBuildFunction());
@@ -28,7 +37,8 @@ void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(db);
 	config.AddExtensionOption("use_query_condition_cache", "Enable automatic query condition cache build and apply",
-	                          LogicalType {LogicalTypeId::BOOLEAN}, Value::BOOLEAN(true));
+	                          LogicalType {LogicalTypeId::BOOLEAN}, Value::BOOLEAN(true),
+	                          OnQueryConditionCacheSettingChange);
 
 	// Register optimizer extension
 	OptimizerExtension::Register(config, QueryConditionCacheOptimizer());

@@ -38,8 +38,8 @@ SELECT * FROM condition_cache_info('t', 'val = 99');
 ----
 0	0	0	0
 
-# Previously built cache still exists
+# Cache was cleared when setting was disabled
 query IIII
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-5	5	245	245
+0	0	0	0
