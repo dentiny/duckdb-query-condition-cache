@@ -59,10 +59,10 @@ TEST_CASE("NormalizeExpressionForCacheKey - comparison operand order", "[normali
 		REQUIRE(key1 == key2);
 	}
 
-	SECTION("no swap when both sides are columns") {
-		// Both sides are non-foldable, should stay as-is
-		auto key = ComputeCanonicalPredicateKey(context, table_entry, "id = val");
-		REQUIRE(key == ComputeCanonicalPredicateKey(context, table_entry, "id = val"));
+	SECTION("both non-foldable: sorted by ToString") {
+		auto key1 = ComputeCanonicalPredicateKey(context, table_entry, "id = val");
+		auto key2 = ComputeCanonicalPredicateKey(context, table_entry, "val = id");
+		REQUIRE(key1 == key2);
 	}
 
 	SECTION("nested comparison in AND is normalized") {
@@ -129,6 +129,14 @@ TEST_CASE("NormalizeExpressionForCacheKey - comparison operand order", "[normali
 		auto key1 = ComputeCanonicalPredicateKey(context, table_entry, "1 < 2");
 		auto key2 = ComputeCanonicalPredicateKey(context, table_entry, "2 > 1");
 		REQUIRE(key1 == key2);
+	}
+
+	SECTION("empty predicate returns empty key") {
+		REQUIRE(ComputeCanonicalPredicateKey(context, table_entry, "").empty());
+	}
+
+	SECTION("whitespace-only predicate returns empty key") {
+		REQUIRE(ComputeCanonicalPredicateKey(context, table_entry, "   ").empty());
 	}
 }
 

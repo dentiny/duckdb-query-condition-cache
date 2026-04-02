@@ -13,6 +13,9 @@
 namespace duckdb {
 
 unique_ptr<Expression> BindPredicate(ClientContext &context, DuckTableEntry &table_entry, const string &predicate_sql) {
+	if (predicate_sql.empty() || predicate_sql.find_first_not_of(' ') == string::npos) {
+		return nullptr;
+	}
 	auto parsed_exprs = Parser::ParseExpressionList(predicate_sql);
 	if (parsed_exprs.empty()) {
 		return nullptr;
@@ -30,14 +33,19 @@ unique_ptr<Expression> BindPredicate(ClientContext &context, DuckTableEntry &tab
 void NormalizeExpressionForCacheKey(Expression &expr) {
 	ExpressionIterator::EnumerateChildren(expr, [](Expression &child) { NormalizeExpressionForCacheKey(child); });
 
-	// Normalize comparison operand order
+	// Normalize comparison operand order:
+	// - constant and column: put constant on right
+	// - both same kind (both foldable or both non-foldable): sort by ToString
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
 		auto &comp = expr.Cast<BoundComparisonExpression>();
-		if (comp.left->IsFoldable() && !comp.right->IsFoldable()) {
+		bool left_foldable = comp.left->IsFoldable();
+		bool right_foldable = comp.right->IsFoldable();
+		if (left_foldable && !right_foldable) {
+			// Constant on left, column on right -> swap
 			std::swap(comp.left, comp.right);
 			comp.type = FlipComparisonExpression(comp.type);
-		} else if (comp.left->IsFoldable() && comp.right->IsFoldable()) {
-			// Both constants: sort by ToString for canonical ordering
+		} else if (left_foldable == right_foldable) {
+			// Both same kind -> sort by ToString for canonical ordering
 			if (comp.left->ToString() > comp.right->ToString()) {
 				std::swap(comp.left, comp.right);
 				comp.type = FlipComparisonExpression(comp.type);
