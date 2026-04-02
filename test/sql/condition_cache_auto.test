@@ -1,0 +1,45 @@
+# name: test/sql/condition_cache_auto.test
+# description: Test automatic cache build via optimizer
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+# Cache enabled by default, query triggers auto cache build
+statement ok
+SELECT count(*) FROM t WHERE val = 42;
+
+# Cache was built automatically
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245
+
+# Different predicate gets its own cache entry
+statement ok
+SELECT count(*) FROM t WHERE id < 3000;
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'id < 3000');
+----
+1	5	2	245
+
+# Disable setting, new predicates should not be cached
+statement ok
+SET use_query_condition_cache = false;
+
+statement ok
+SELECT count(*) FROM t WHERE val = 99;
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 99');
+----
+0	0	0	0
+
+# Previously built cache still exists
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245
