@@ -7,6 +7,7 @@
 #include "duckdb/common/array.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
@@ -78,6 +79,35 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	CacheEntryStats ComputeStats(idx_t total_rows) const;
 };
 
+// Per-table index stored in ObjectCache (non-evictable). Tracks which
+// filter_keys have cache entries for a given table, enabling fast
+// invalidation lookup when DML modifies the table.
+struct TableFilterKeyIndex : public ObjectCacheEntry {
+	concurrency::mutex lock;
+	// Keys that have been cached for this table; entries may have been evicted by LRU.
+	// Absence of a key guarantees it is not cached.
+	unordered_set<string> filter_keys DUCKDB_GUARDED_BY(lock);
+
+	static string ObjectType() {
+		return "query_condition_cache_filter_key_index";
+	}
+
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	// Add a filter key. No-op if it already exists.
+	void Add(const string &filter_key);
+	// Remove a filter key. Assumes the key must appear in the set.
+	void Remove(const string &filter_key);
+	bool IsEmpty();
+	unordered_set<string> GetAll();
+};
+
 // Stored in DuckDB's per-database ObjectCache
 class ConditionCacheStore : public ObjectCacheEntry {
 public:
@@ -101,12 +131,26 @@ public:
 	// Upsert an entry
 	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
+	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
+	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
+	                              const unordered_set<idx_t> &row_group_indices);
+
+	// Check if any entries exist for a given table OID
+	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
+
+	// Clear all cache entries and filter key indices
+	void ClearAll(ClientContext &context);
+
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:
-	// Generate a unique cache key string from CacheKey
+	concurrency::mutex lock;
+	// Tracks all table OIDs that have been cached, for ClearAll
+	unordered_set<idx_t> cached_table_oids DUCKDB_GUARDED_BY(lock);
+
 	static string MakeCacheKeyString(const CacheKey &key);
+	static string MakeFilterKeyIndexKey(idx_t table_oid);
 };
 
 } // namespace duckdb
