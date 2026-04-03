@@ -28,10 +28,22 @@ OS page caches are dropped between phases (requires `sudo` for `purge`/`drop_cac
 Runs 43 ClickBench queries (Q00–Q42) on the `hits` table. Downloads ~15 GB of parquet data from ClickHouse on first run and caches it in `clickbench.duckdb`.
 
 ```bash
-python benchmark/run_clickbench_benchmark.py --repeat 5 --queries 1,3,5,10
+uv run python benchmark/run_clickbench_benchmark.py --repeat 5 --queries 1,3,5,10
 ```
 
 Key flags: `--repeat N`, `--queries 1,3,5`, `--threads N`, `--memory-limit 4GB`, `--regenerate`, `--no-chart`
+
+### `run_hdfs_log_benchmark.py`
+
+Downloads the HDFS_v2 dataset from Zenodo (~71M rows from a 32-node cluster). Same story-based protocol as Spark but on a larger dataset:
+
+- **Story 1** — Block Health Dashboard: `LIKE '%blk_%'` queries
+- **Story 2** — SRE Replication Drill-Down: `addStoredBlock` analysis
+- **Story 3** — Error Investigation: WARN/ERROR + Exception patterns
+
+```bash
+uv run python benchmark/run_hdfs_log_benchmark.py --repeat 5 --stories 1,2,3
+```
 
 ## Output
 
