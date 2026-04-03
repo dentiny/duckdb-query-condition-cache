@@ -84,6 +84,8 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 // invalidation lookup when DML modifies the table.
 struct TableFilterKeyIndex : public ObjectCacheEntry {
 	concurrency::mutex lock;
+	// Keys that have been cached for this table; entries may have been evicted by LRU.
+	// Absence of a key guarantees it is not cached.
 	unordered_set<string> filter_keys DUCKDB_GUARDED_BY(lock);
 
 	static string ObjectType() {
@@ -98,9 +100,9 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 		return optional_idx {};
 	}
 
-	// Add a filter key. No-op if it already exists (deduplication).
+	// Add a filter key. No-op if it already exists.
 	void Add(const string &filter_key);
-	// Remove a filter key. No-op if it doesn't exist.
+	// Remove a filter key. Assumes the key must appear in the set.
 	void Remove(const string &filter_key);
 	bool IsEmpty();
 	unordered_set<string> GetAll();

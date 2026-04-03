@@ -88,6 +88,7 @@ void TableFilterKeyIndex::Add(const string &filter_key) {
 
 void TableFilterKeyIndex::Remove(const string &filter_key) {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	D_ASSERT(filter_keys.count(filter_key) > 0);
 	filter_keys.erase(filter_key);
 }
 
