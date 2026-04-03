@@ -100,6 +100,7 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 
 	void Add(const string &filter_key);
 	void Remove(const string &filter_key);
+	bool IsEmpty();
 	vector<string> GetAll();
 };
 
@@ -133,7 +134,7 @@ public:
 	// Check if any entries exist for a given table OID
 	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
 
-	// Clear all cache entries and filter key indexes
+	// Clear all cache entries and filter key indices
 	void ClearAll(ClientContext &context);
 
 	// Get or create the store from a client context

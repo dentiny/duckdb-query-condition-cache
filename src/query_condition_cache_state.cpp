@@ -93,12 +93,19 @@ void TableFilterKeyIndex::Add(const string &filter_key) {
 
 void TableFilterKeyIndex::Remove(const string &filter_key) {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	for (auto it = filter_keys.begin(); it != filter_keys.end(); ++it) {
-		if (*it == filter_key) {
-			filter_keys.erase(it);
+	for (idx_t idx = 0; idx < filter_keys.size(); ++idx) {
+		if (filter_keys[idx] == filter_key) {
+			// Swap with last element to pop_back
+			std::swap(filter_keys[idx], filter_keys.back());
+			filter_keys.pop_back();
 			return;
 		}
 	}
+}
+
+bool TableFilterKeyIndex::IsEmpty() {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	return filter_keys.empty();
 }
 
 vector<string> TableFilterKeyIndex::GetAll() {
@@ -155,6 +162,7 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 		string cache_key = MakeCacheKeyString(key);
 		auto entry = cache.Get<ConditionCacheEntry>(cache_key);
 		if (!entry) {
+			// Entry was evicted by LRU, clean up stale index
 			index->Remove(filter_key);
 			continue;
 		}
@@ -174,7 +182,7 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 bool ConditionCacheStore::HasEntriesForTable(ClientContext &context, idx_t table_oid) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
-	return index && !index->GetAll().empty();
+	return index && !index->IsEmpty();
 }
 
 void ConditionCacheStore::ClearAll(ClientContext &context) {
