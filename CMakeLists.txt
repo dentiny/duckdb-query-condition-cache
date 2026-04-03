@@ -13,12 +13,18 @@ if(UNIX OR APPLE)
   )
 endif()
 
+if(CMAKE_CXX_COMPILER_ID_LOWER MATCHES "clang" OR CMAKE_CXX_COMPILER_LOWER
+                                                  MATCHES "clang")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wthread-safety")
+endif()
+
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/cache_invalidation_optimizer.cpp
     src/logical_cache_invalidator.cpp
     src/physical_cache_invalidator.cpp
+    src/predicate_key_utils.cpp
     src/query_condition_cache_extension.cpp
     src/query_condition_cache_filter.cpp
     src/query_condition_cache_functions.cpp
@@ -35,3 +41,8 @@ install(
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
 add_subdirectory(test/unittest)
+
+if(${BUILD_BENCHMARKS})
+  add_executable(benchmark_cache_build benchmark/benchmark_cache_build.cpp)
+  target_link_libraries(benchmark_cache_build duckdb ${EXTENSION_NAME})
+endif()

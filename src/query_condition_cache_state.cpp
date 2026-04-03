@@ -23,8 +23,8 @@ bool RowGroupFilter::VectorHasRows(idx_t vector_index) const {
 }
 
 bool RowGroupFilter::IsEmpty() const {
-	for (const auto &w : matching_vectors) {
-		if (w != 0) {
+	for (const auto &word : matching_vectors) {
+		if (word != 0) {
 			return false;
 		}
 	}
@@ -40,18 +40,52 @@ void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
 // ------- CONDITION_CACHE_ENTRY -------
 
 optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+
 	// Rough estimate: each RowGroupFilter is ~BITVECTOR_ARRAY_SIZE * 8 bytes
-	// Plus overhead for the map structure
+	// plus overhead for the map structure.
 	idx_t estimated_size = sizeof(ConditionCacheEntry);
-	estimated_size += bitvectors.size() * (sizeof(idx_t) + sizeof(RowGroupFilter) + 32); // map overhead
+	estimated_size += bitvectors.size() * (sizeof(idx_t) + sizeof(RowGroupFilter) + 32);
 	return optional_idx(estimated_size);
+}
+
+CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+
+	idx_t qualifying_vectors = 0;
+	idx_t qualifying_row_groups = 0;
+	for (const auto &[rg_idx, filter] : bitvectors) {
+		if (!filter.IsEmpty()) {
+			++qualifying_row_groups;
+		}
+		for (idx_t v = 0; v < VECTORS_PER_ROW_GROUP; ++v) {
+			if (filter.VectorHasRows(v)) {
+				++qualifying_vectors;
+			}
+		}
+	}
+
+	idx_t full_row_groups = total_rows / DEFAULT_ROW_GROUP_SIZE;
+	idx_t remaining_rows = total_rows % DEFAULT_ROW_GROUP_SIZE;
+	idx_t total_vectors = full_row_groups * VECTORS_PER_ROW_GROUP;
+	if (remaining_rows > 0) {
+		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+	}
+	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
+
+	return CacheEntryStats {
+	    .qualifying_vectors = qualifying_vectors,
+	    .total_vectors = total_vectors,
+	    .qualifying_row_groups = qualifying_row_groups,
+	    .total_row_groups = total_row_groups,
+	};
 }
 
 // ------- TABLE_FILTER_KEY_INDEX -------
 
 void TableFilterKeyIndex::Add(const string &filter_key) {
-	lock_guard<mutex> guard(lock);
-	for (auto &existing : filter_keys) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	for (const auto &existing : filter_keys) {
 		if (existing == filter_key) {
 			return;
 		}
@@ -60,7 +94,7 @@ void TableFilterKeyIndex::Add(const string &filter_key) {
 }
 
 void TableFilterKeyIndex::Remove(const string &filter_key) {
-	lock_guard<mutex> guard(lock);
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	for (auto it = filter_keys.begin(); it != filter_keys.end(); ++it) {
 		if (*it == filter_key) {
 			filter_keys.erase(it);
@@ -70,18 +104,18 @@ void TableFilterKeyIndex::Remove(const string &filter_key) {
 }
 
 vector<string> TableFilterKeyIndex::GetAll() {
-	lock_guard<mutex> guard(lock);
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return filter_keys;
 }
 
 // ------- CONDITION_CACHE_STORE -------
 
 string ConditionCacheStore::MakeCacheKeyString(const CacheKey &key) {
-	return StringUtil::Format("qcc_entry:%llu:%s", key.table_oid, key.filter_key);
+	return StringUtil::Format("query_condition_cache_entry:%llu:%s", key.table_oid, key.filter_key);
 }
 
 string ConditionCacheStore::MakeFilterKeyIndexKey(idx_t table_oid) {
-	return StringUtil::Format("qcc_filter_key_index:%llu", table_oid);
+	return StringUtil::Format("query_condition_cache_filter_key_index:%llu", table_oid);
 }
 
 shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(ClientContext &context, const CacheKey &key) {
@@ -93,6 +127,7 @@ void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, sh
 	if (!entry) {
 		throw InvalidInputException("ConditionCacheStore::Upsert: entry must not be null");
 	}
+
 	auto &cache = ObjectCache::GetObjectCache(context);
 	cache.Put(MakeCacheKeyString(key), std::move(entry));
 
@@ -103,33 +138,39 @@ void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, sh
 idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
                                                    const unordered_set<idx_t> &row_group_indices) {
 	auto &cache = ObjectCache::GetObjectCache(context);
-
 	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
 	if (!index) {
 		return 0;
 	}
 
-	auto filter_keys = index->GetAll();
 	idx_t removed_count = 0;
-
-	for (auto &filter_key : filter_keys) {
+	auto filter_keys = index->GetAll();
+	for (const auto &filter_key : filter_keys) {
 		CacheKey key {table_oid, filter_key};
-		string cache_key = MakeCacheKeyString(key);
+		auto cache_key = MakeCacheKeyString(key);
 		auto entry = cache.Get<ConditionCacheEntry>(cache_key);
 		if (!entry) {
 			index->Remove(filter_key);
 			continue;
 		}
-		for (auto rg_idx : row_group_indices) {
-			if (entry->bitvectors.erase(rg_idx) > 0) {
-				++removed_count;
+
+		bool entry_empty = false;
+		{
+			concurrency::lock_guard<concurrency::mutex> guard(entry->lock);
+			for (auto rg_idx : row_group_indices) {
+				if (entry->bitvectors.erase(rg_idx) > 0) {
+					++removed_count;
+				}
 			}
+			entry_empty = entry->bitvectors.empty();
 		}
-		if (entry->bitvectors.empty()) {
+
+		if (entry_empty) {
 			cache.Delete(cache_key);
 			index->Remove(filter_key);
 		}
 	}
+
 	return removed_count;
 }
 

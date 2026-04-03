@@ -2,6 +2,7 @@
   "description": "Run tests with use_query_condition_cache setting enabled",
   "statically_loaded_extensions": [
     "core_functions",
+    "parquet",
     "query_condition_cache"
   ],
   "on_init": "LOAD query_condition_cache;",

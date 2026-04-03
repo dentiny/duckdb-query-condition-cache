@@ -5,7 +5,7 @@ Benchmark harnesses for the QueryConditionCache DuckDB extension. All scripts me
 ## Prerequisites
 
 ```bash
-pip install duckdb matplotlib numpy
+uv sync
 ```
 
 The extension must be built first (`GEN=ninja make`). Scripts auto-detect the built extension at `build/release/extension/query_condition_cache/query_condition_cache.duckdb_extension`.
@@ -28,7 +28,7 @@ OS page caches are dropped between phases (requires `sudo` for `purge`/`drop_cac
 Runs 43 ClickBench queries (Q00–Q42) on the `hits` table. Downloads ~15 GB of parquet data from ClickHouse on first run and caches it in `clickbench.duckdb`.
 
 ```bash
-python benchmark/run_clickbench_benchmark.py --repeat 5 --queries 1,3,5,10
+uv run python benchmark/run_clickbench_benchmark.py --repeat 5 --queries 1,3,5,10
 ```
 
 Key flags: `--repeat N`, `--queries 1,3,5`, `--threads N`, `--memory-limit 4GB`, `--regenerate`, `--no-chart`
@@ -38,7 +38,7 @@ Key flags: `--repeat N`, `--queries 1,3,5`, `--threads N`, `--memory-limit 4GB`,
 Runs the 22 standard TPC-H queries plus 8 dashboard-style queries (LIKE, OR, mixed predicates) on `lineitem`. Generates TPC-H data via `CALL dbgen(sf=N)`.
 
 ```bash
-python benchmark/run_tpch_benchmark.py --sf 10 --repeat 3
+uv run python benchmark/run_tpch_benchmark.py --sf 10 --repeat 3
 ```
 
 Key flags: `--sf N`, `--no-tpch`, `--no-dashboard`, `--threads N`, `--memory-limit 4GB`
@@ -52,7 +52,7 @@ Downloads the Spark log dataset from Zenodo (loghub-2.0, ~33M rows) and benchmar
 - **Story 3** — Pattern Matching: SecurityManager log analysis
 
 ```bash
-python benchmark/run_spark_log_benchmark.py --repeat 5 --stories 1,2
+uv run python benchmark/run_spark_log_benchmark.py --repeat 5 --stories 1,2
 ```
 
 Key flags: `--stories 1,2,3`, `--individual` (also run each query with a fresh connection)
@@ -66,7 +66,7 @@ Downloads the HDFS_v2 dataset from Zenodo (~71M rows from a 32-node cluster). Sa
 - **Story 3** — Error Investigation: WARN/ERROR + Exception patterns
 
 ```bash
-python benchmark/run_hdfs_log_benchmark.py --repeat 5 --stories 1,2,3
+uv run python benchmark/run_hdfs_log_benchmark.py --repeat 5 --stories 1,2,3
 ```
 
 ## SQL Benchmarks

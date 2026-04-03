@@ -15,20 +15,20 @@ SELECT status FROM condition_cache_build('t', 'val = 42');
 Cache Built: 245/245 vectors, 5/5 row groups
 
 # Verify 5 row groups are cached
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-5
+5	5	245	245
 
 # DELETE a row in RG0 should invalidate only RG0
 statement ok
 DELETE FROM t WHERE id = 42;
 
 # Only 4 row groups remain cached (RG0 invalidated)
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-4
+4	5	185	245
 
 # Rebuild restores all 5 row groups
 query I
@@ -36,19 +36,19 @@ SELECT status FROM condition_cache_build('t', 'val = 42');
 ----
 Cache Built: 245/245 vectors, 5/5 row groups
 
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-5
+5	5	245	245
 
 # UPDATE a row in RG0 should invalidate only RG0
 statement ok
 UPDATE t SET val = 999 WHERE id = 200;
 
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-4
+4	5	185	245
 
 # Rebuild
 query I
@@ -63,25 +63,25 @@ SELECT status FROM condition_cache_build('t', 'id < 3000');
 ----
 Cache Built: 2/245 vectors, 1/5 row groups
 
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'id < 3000');
 ----
-1
+1	5	2	245
 
 statement ok
 INSERT INTO t VALUES (999999, 0);
 
 # RG0 cache (for 'id < 3000') should be preserved since insert only affects the last RG
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'id < 3000');
 ----
-1
+1	5	2	245
 
 # But 'val = 42' cache lost its last RG (RG4 where new row was appended)
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-4
+4	5	240	245
 
 # Cross-table isolation: DML on table B should not affect table A's cache
 statement ok
@@ -97,16 +97,16 @@ statement ok
 DELETE FROM t2 WHERE id < 100;
 
 # t's cache is unaffected by t2's DML
-query I
+query IIII
 SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-5
+5	5	245	245
 
 # No cache entry returns 0
-query I
+query IIII
 SELECT * FROM condition_cache_info('t2', 'val = 5');
 ----
-0
+0	0	0	0
 
 # ============================================================================
 # TRUNCATE should not crash and stale entries should be harmless
@@ -120,10 +120,10 @@ SELECT status FROM condition_cache_build('t_trunc', 'val = 42');
 ----
 Cache Built: 245/245 vectors, 5/5 row groups
 
-query I
+query IIII
 SELECT * FROM condition_cache_info('t_trunc', 'val = 42');
 ----
-5
+5	5	245	245
 
 statement ok
 TRUNCATE t_trunc;

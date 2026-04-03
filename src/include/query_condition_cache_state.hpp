@@ -1,15 +1,19 @@
 #pragma once
 
+#include "concurrency/annotated_lock.hpp"
+#include "concurrency/annotated_mutex.hpp"
+#include "concurrency/thread_annotation.hpp"
+
 #include "duckdb/common/array.hpp"
-#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
 
-// Derived from DuckDB's compile-time configurable constants
+// Derived from DuckDB's compile-time configurable constants.
 inline constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
 inline constexpr idx_t BITVECTOR_ARRAY_SIZE = (VECTORS_PER_ROW_GROUP + 63) / 64;
 static_assert(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE == 0,
@@ -33,7 +37,7 @@ struct RowGroupFilter {
 	void MergeFrom(const RowGroupFilter &other);
 };
 
-// Composite key for cache lookup: (table_oid, filter_key)
+// Composite key for cache lookup: (table_oid, filter_key).
 struct CacheKey {
 	idx_t table_oid;
 	string filter_key;
@@ -49,9 +53,17 @@ struct CacheKeyHashFunction {
 	}
 };
 
+struct CacheEntryStats {
+	idx_t qualifying_vectors;
+	idx_t total_vectors;
+	idx_t qualifying_row_groups;
+	idx_t total_row_groups;
+};
+
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
-	unordered_map<idx_t, RowGroupFilter> bitvectors; // rg_idx -> bitvector
+	mutable concurrency::mutex lock;
+	unordered_map<idx_t, RowGroupFilter> bitvectors DUCKDB_GUARDED_BY(lock); // rg_idx -> bitvector
 
 	static string ObjectType() {
 		return "query_condition_cache_entry";
@@ -61,16 +73,19 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 		return ObjectType();
 	}
 
-	// Return estimated memory usage for LRU eviction
+	// Return estimated memory usage for LRU eviction.
 	optional_idx GetEstimatedCacheMemory() const override;
+
+	// Compute statistics about qualifying vectors and row groups.
+	CacheEntryStats ComputeStats(idx_t total_rows) const;
 };
 
 // Per-table index stored in ObjectCache (non-evictable). Holds the set of
-// filter_keys for which ConditionCacheEntry objects exist, enabling
+// filter keys for which ConditionCacheEntry objects exist, enabling
 // invalidation lookups by table_oid.
 struct TableFilterKeyIndex : public ObjectCacheEntry {
-	mutex lock;
-	vector<string> filter_keys;
+	mutable concurrency::mutex lock;
+	vector<string> filter_keys DUCKDB_GUARDED_BY(lock);
 
 	static string ObjectType() {
 		return "query_condition_cache_filter_key_index";
@@ -89,7 +104,7 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 	vector<string> GetAll();
 };
 
-// Stored in DuckDB's per-database ObjectCache
+// Stored in DuckDB's per-database ObjectCache.
 class ConditionCacheStore : public ObjectCacheEntry {
 public:
 	static constexpr const char *CACHE_KEY = "query_condition_cache_store";
@@ -106,20 +121,21 @@ public:
 		return optional_idx {};
 	}
 
-	// Lookup by cache key; returns nullptr if not found
+	// Lookup by cache key; returns nullptr if not found.
 	shared_ptr<ConditionCacheEntry> Lookup(ClientContext &context, const CacheKey &key);
 
-	// Upsert an entry
+	// Upsert an entry.
 	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
-	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
+	// Remove specific row groups from all entries for a table.
+	// Returns the number of row groups removed across all matching entries.
 	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
 	                              const unordered_set<idx_t> &row_group_indices);
 
-	// Check if any entries exist for a given table OID
+	// Check if any entries exist for a given table OID.
 	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
 
-	// Get or create the store from a client context
+	// Get or create the store from a client context.
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:

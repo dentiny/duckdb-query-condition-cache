@@ -8,10 +8,13 @@ test/python/__pycache__/
 .Rhistory
 .vscode
 .claude
+.cache/
 .tmp/
 benchmark/tpch_sf*.duckdb*
 benchmark/clickbench.duckdb*
-__pycache__/
 benchmark/spark_data/
 benchmark/hdfs_data/
 benchmark/*.tmp
+__pycache__/
+AGENTS.md
+CLAUDE.md

@@ -9,7 +9,8 @@
 
 namespace duckdb {
 
-// Bind data containing the cached bitvectors
+// Holds a shared_ptr to the ConditionCacheEntry so the filter function
+// and CheckStatistics can access the bitvectors during execution.
 struct ConditionCacheFilterBindData : public FunctionData {
 	shared_ptr<ConditionCacheEntry> cache_entry;
 
@@ -19,20 +20,22 @@ struct ConditionCacheFilterBindData : public FunctionData {
 	bool Equals(const FunctionData &other_p) const override;
 };
 
-// Bind callback (should never be called directly — bind data is created by the optimizer)
+// Called during plan deserialization/verification when the optimizer's bind data
+// is not available. Returns an empty cache entry that passes all rows through.
 unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, ScalarFunction &bound_function,
                                                   vector<unique_ptr<Expression>> &arguments);
-
-// Per-thread local state (placeholder)
-struct ConditionCacheFilterState : public FunctionLocalState {};
 
 unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, const BoundFunctionExpression &expr,
                                                         FunctionData *bind_data);
 
-// The filter function: for each vector, check the bitvector and return constant boolean
+// Vector-level filter: takes a ROW_ID column as input, looks up the bitvector
+// for that row group + vector index, and returns a constant BOOLEAN for the
+// entire vector. Defaults to true for row groups not in cache.
 void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &result);
 
-// ExpressionFilter subclass that overrides CheckStatistics for row-group level pruning
+// Row-group level pruning via CheckStatistics. If all row groups covered by
+// the stats range are cached and empty, returns FILTER_ALWAYS_FALSE to skip
+// the entire row group. Otherwise returns NO_PRUNING_POSSIBLE.
 class CacheExpressionFilter : public ExpressionFilter {
 public:
 	shared_ptr<ConditionCacheEntry> cache_entry;

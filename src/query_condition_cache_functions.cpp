@@ -1,7 +1,10 @@
 #include "query_condition_cache_functions.hpp"
 
+#include "predicate_key_utils.hpp"
+
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -10,15 +13,14 @@
 #include "duckdb/common/vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parallel/task_executor.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
-#include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
-#include "duckdb/parallel/task_executor.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
@@ -36,7 +38,7 @@ struct ConditionCacheBuildBindData : public TableFunctionData {
 	string table;
 	string predicate_sql;
 	idx_t table_oid;
-	idx_t total_rows; // total number of rows in the table
+	idx_t total_rows;
 };
 
 struct ConditionCacheBuildState : public GlobalTableFunctionState {
@@ -48,7 +50,6 @@ unique_ptr<FunctionData> ConditionCacheBuildBind(ClientContext &context, TableFu
 	auto result = make_uniq<ConditionCacheBuildBindData>();
 	result->predicate_sql = input.inputs[1].GetValue<string>();
 
-	// Parse qualified table name (supports "table", "schema.table", "catalog.schema.table")
 	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
 	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
 	result->catalog = std::move(qname.catalog);
@@ -60,8 +61,7 @@ unique_ptr<FunctionData> ConditionCacheBuildBind(ClientContext &context, TableFu
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
 
 	names.emplace_back("status");
-	return_types.emplace_back(LogicalTypeId::VARCHAR);
-
+	return_types.emplace_back(LogicalType {LogicalTypeId::VARCHAR});
 	return result;
 }
 
@@ -85,7 +85,7 @@ void RemapColumnIndices(Expression &expr, const unordered_map<column_t, idx_t> &
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 		auto &ref = expr.Cast<BoundReferenceExpression>();
 		auto it = mapping.find(ref.index);
-		ALWAYS_ASSERT(it != mapping.end());
+		D_ASSERT(it != mapping.end());
 		ref.index = it->second;
 	}
 	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { RemapColumnIndices(child, mapping); });
@@ -99,13 +99,13 @@ struct ScanColumn {
 // Task that scans a subset of row groups in parallel and builds a local ConditionCacheEntry.
 class CacheBuildTask : public BaseExecutorTask {
 public:
-	CacheBuildTask(TaskExecutor &executor, ClientContext &context, DataTable &storage, DuckTransaction &transaction,
-	               ParallelTableScanState &parallel_state, Expression &bound_expr,
-	               const vector<StorageIndex> &column_ids, const vector<LogicalType> &scan_types,
-	               idx_t rowid_col_idx, ConditionCacheEntry &local_entry)
-	    : BaseExecutorTask(executor), context(context), storage(storage), transaction(transaction),
-	      parallel_state(parallel_state), bound_expr(bound_expr), column_ids(column_ids), scan_types(scan_types),
-	      rowid_col_idx(rowid_col_idx), local_entry(local_entry) {
+	CacheBuildTask(TaskExecutor &executor_p, ClientContext &context_p, DataTable &storage_p,
+	               DuckTransaction &transaction_p, ParallelTableScanState &parallel_state_p, Expression &bound_expr_p,
+	               const vector<StorageIndex> &column_ids_p, const vector<LogicalType> &scan_types_p,
+	               idx_t rowid_col_idx_p, ConditionCacheEntry &local_entry_p)
+	    : BaseExecutorTask(executor_p), context(context_p), storage(storage_p), transaction(transaction_p),
+	      parallel_state(parallel_state_p), bound_expr(bound_expr_p), column_ids(column_ids_p),
+	      scan_types(scan_types_p), rowid_col_idx(rowid_col_idx_p), local_entry(local_entry_p) {
 	}
 
 	void ExecuteTask() override {
@@ -125,13 +125,26 @@ public:
 					break;
 				}
 
-				SelectionVector sel(chunk.size());
-				idx_t match_count = expr_executor.SelectExpression(chunk, sel);
-
 				auto &rowid_vec = chunk.data[rowid_col_idx];
 				UnifiedVectorFormat rowid_data;
 				rowid_vec.ToUnifiedFormat(chunk.size(), rowid_data);
 				auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
+
+				// Instantiate a RowGroupFilter for each scanned row group so fully excluded
+				// row groups are recorded as explicit empty cache entries.
+				auto first_rowid_idx = rowid_data.sel->get_index(0);
+				if (!rowid_data.validity.RowIsValid(first_rowid_idx)) {
+					continue;
+				}
+				auto first_row_id = NumericCast<idx_t>(rowids[first_rowid_idx]);
+				if (first_row_id >= NumericCast<idx_t>(MAX_ROW_ID)) {
+					continue;
+				}
+				idx_t row_group_idx = first_row_id / DEFAULT_ROW_GROUP_SIZE;
+				(void)local_entry.bitvectors[row_group_idx];
+
+				SelectionVector sel(chunk.size());
+				idx_t match_count = expr_executor.SelectExpression(chunk, sel);
 
 				for (idx_t idx = 0; idx < match_count; ++idx) {
 					auto rowid_entry = rowid_data.sel->get_index(sel.get_index(idx));
@@ -139,9 +152,9 @@ public:
 						continue;
 					}
 					auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
-					idx_t row_group_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
+					idx_t rg_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
 					idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-					local_entry.bitvectors[row_group_idx].SetVector(vector_idx);
+					local_entry.bitvectors[rg_idx].SetVector(vector_idx);
 				}
 			}
 		}
@@ -163,23 +176,28 @@ private:
 	ConditionCacheEntry &local_entry;
 };
 
+struct ConditionCacheInfoBindData : public TableFunctionData {
+	idx_t table_oid;
+	idx_t total_rows;
+	string canonical_key;
+};
+
+struct ConditionCacheInfoState : public GlobalTableFunctionState {
+	bool done = false;
+};
+
 } // namespace
 
-// Scan all rows in parallel, evaluate predicate, and build a ConditionCacheEntry.
-// Modifies bound_expr in-place (remaps column indices to scan positions).
 shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTableEntry &table_entry,
                                                 Expression &bound_expr) {
 	auto &storage = table_entry.GetStorage();
 	auto &columns = table_entry.GetColumns();
 
-	// Only scan columns referenced by the predicate, plus rowid
 	unordered_set<column_t> referenced_oids;
 	CollectReferencedColumns(bound_expr, referenced_oids);
 
 	vector<ScanColumn> scan_columns;
-	// Maps storage column OID to scan position in DataChunk
 	unordered_map<column_t, idx_t> storage_to_scan_idx;
-
 	scan_columns.reserve(referenced_oids.size() + 1);
 
 	idx_t scan_pos = 0;
@@ -204,14 +222,12 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 
 	RemapColumnIndices(bound_expr, storage_to_scan_idx);
 
-	// Parallel table scan with TaskExecutor
 	auto &transaction = DuckTransaction::Get(context, table_entry.ParentCatalog().GetAttached());
 
-	// Build ColumnIndex vector for parallel scan initialization
 	vector<ColumnIndex> column_indexes;
 	column_indexes.reserve(column_ids.size());
 	for (const auto &si : column_ids) {
-		column_indexes.emplace_back(ColumnIndex(si.GetPrimaryIndex()));
+		column_indexes.emplace_back(si.GetPrimaryIndex());
 	}
 
 	ParallelTableScanState parallel_state;
@@ -231,45 +247,14 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 	}
 	task_executor.WorkOnTasks();
 
-	// Merge local entries into final result
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
 	for (const auto &local : local_entries) {
-		for (const auto &pair : local.bitvectors) {
-			entry->bitvectors[pair.first].MergeFrom(pair.second);
+		for (const auto &[rg_idx, filter] : local.bitvectors) {
+			entry->bitvectors[rg_idx].MergeFrom(filter);
 		}
 	}
 
 	return entry;
-}
-
-CacheEntryStats ComputeCacheEntryStats(const ConditionCacheEntry &entry, idx_t total_rows) {
-	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
-
-	idx_t qualifying_vectors = 0;
-	for (const auto &bitvector_pair : entry.bitvectors) {
-		for (idx_t v = 0; v < vectors_per_row_group; ++v) {
-			if (bitvector_pair.second.VectorHasRows(v)) {
-				++qualifying_vectors;
-			}
-		}
-	}
-
-	idx_t full_row_groups = total_rows / DEFAULT_ROW_GROUP_SIZE;
-	idx_t remaining_rows = total_rows % DEFAULT_ROW_GROUP_SIZE;
-	idx_t total_vectors = full_row_groups * vectors_per_row_group;
-	if (remaining_rows > 0) {
-		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
-	}
-
-	idx_t qualifying_row_groups = entry.bitvectors.size();
-	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
-
-	return CacheEntryStats {
-	    .qualifying_vectors = qualifying_vectors,
-	    .total_vectors = total_vectors,
-	    .qualifying_row_groups = qualifying_row_groups,
-	    .total_row_groups = total_row_groups,
-	};
 }
 
 void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -280,39 +265,33 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	gstate.done = true;
 
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheBuildBindData>();
-
 	auto &table_entry =
 	    Catalog::GetEntry<DuckTableEntry>(context, bind_data.catalog, bind_data.schema, bind_data.table);
 
-	// Parse predicate SQL and bind column references to table columns
 	auto parsed_exprs = Parser::ParseExpressionList(bind_data.predicate_sql);
 	if (parsed_exprs.empty()) {
 		throw InvalidInputException("condition_cache_build: failed to parse predicate");
 	}
-	// Reject bare column references (e.g. predicate = 'val')
 	if (parsed_exprs[0]->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
 		throw InvalidInputException(
 		    "condition_cache_build: predicate must be a boolean expression, not a column reference");
 	}
 
-	auto binder = Binder::CreateBinder(context);
-	physical_index_set_t bound_columns;
-	CheckBinder check_binder(*binder, context, bind_data.table, table_entry.GetColumns(), bound_columns);
-	auto bound_expr = check_binder.Bind(parsed_exprs[0]);
+	auto canonical_key = ComputeCanonicalPredicateKey(context, table_entry, bind_data.predicate_sql);
+	if (canonical_key.empty()) {
+		throw InvalidInputException("condition_cache_build: failed to parse predicate");
+	}
 
-	// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN for SelectExpression.
+	auto bound_expr = BindPredicate(context, table_entry, bind_data.predicate_sql);
+	D_ASSERT(bound_expr);
 	bound_expr =
 	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 	auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
-	auto stats = ComputeCacheEntryStats(*entry, bind_data.total_rows);
+	auto stats = entry->ComputeStats(bind_data.total_rows);
 
-	// Store in cache
-	// TODO: Use canonical predicate key (sorted expressions) so that "a AND b" and "b AND a" hit same entry
-	// TODO: Invalidate cache on table modification (INSERT/DELETE/UPDATE/VACUUM)
-	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	store->Upsert(context, key, std::move(entry));
+	store->Upsert(context, CacheKey {bind_data.table_oid, std::move(canonical_key)}, std::move(entry));
 
 	output.SetCardinality(1);
 	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
@@ -321,40 +300,37 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 }
 
 TableFunction ConditionCacheBuildFunction() {
-	TableFunction func(
+	return TableFunction(
 	    "condition_cache_build",
-	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
+	    {LogicalType {LogicalTypeId::VARCHAR}, LogicalType {LogicalTypeId::VARCHAR}},
 	    ConditionCacheBuildExecute, ConditionCacheBuildBind, ConditionCacheBuildInit);
-	return func;
 }
 
 // ------- condition_cache_info(table_name VARCHAR, predicate VARCHAR) -------
-// Returns the number of cached row groups for a given (table, predicate) pair.
-// Returns 0 if no cache entry exists.
-
-struct ConditionCacheInfoBindData : public TableFunctionData {
-	idx_t table_oid;
-	string predicate_sql;
-};
-
-struct ConditionCacheInfoState : public GlobalTableFunctionState {
-	bool done = false;
-};
 
 unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<ConditionCacheInfoBindData>();
-	result->predicate_sql = input.inputs[1].GetValue<string>();
+	auto predicate_sql = input.inputs[1].GetValue<string>();
 
 	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
 	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
 
 	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, qname.catalog, qname.schema, qname.name);
 	result->table_oid = table_entry.oid;
+	result->total_rows = table_entry.GetStorage().GetTotalRows();
+	result->canonical_key = ComputeCanonicalPredicateKey(context, table_entry, predicate_sql);
 
+	names.reserve(4);
+	return_types.reserve(4);
 	names.emplace_back("cached_row_groups");
-	return_types.emplace_back(LogicalType::INTEGER);
-
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
+	names.emplace_back("total_row_groups");
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
+	names.emplace_back("qualifying_vectors");
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
+	names.emplace_back("total_vectors");
+	return_types.emplace_back(LogicalType {LogicalTypeId::INTEGER});
 	return result;
 }
 
@@ -370,24 +346,28 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 	gstate.done = true;
 
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheInfoBindData>();
-	CacheKey key {bind_data.table_oid, bind_data.predicate_sql};
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	auto entry = store->Lookup(context, key);
+	auto entry = store->Lookup(context, CacheKey {bind_data.table_oid, bind_data.canonical_key});
 
 	output.SetCardinality(1);
 	if (entry) {
-		output.data[0].SetValue(0, Value::INTEGER(static_cast<int32_t>(entry->bitvectors.size())));
+		auto stats = entry->ComputeStats(bind_data.total_rows);
+		output.data[0].SetValue(0, Value::INTEGER(NumericCast<int32_t>(stats.qualifying_row_groups)));
+		output.data[1].SetValue(0, Value::INTEGER(NumericCast<int32_t>(stats.total_row_groups)));
+		output.data[2].SetValue(0, Value::INTEGER(NumericCast<int32_t>(stats.qualifying_vectors)));
+		output.data[3].SetValue(0, Value::INTEGER(NumericCast<int32_t>(stats.total_vectors)));
 	} else {
-		output.data[0].SetValue(0, Value::INTEGER(0));
+		for (idx_t col = 0; col < 4; ++col) {
+			output.data[col].SetValue(0, Value::INTEGER(0));
+		}
 	}
 }
 
 TableFunction ConditionCacheInfoFunction() {
-	TableFunction func(
+	return TableFunction(
 	    "condition_cache_info",
-	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
+	    {LogicalType {LogicalTypeId::VARCHAR}, LogicalType {LogicalTypeId::VARCHAR}},
 	    ConditionCacheInfoExecute, ConditionCacheInfoBind, ConditionCacheInfoInit);
-	return func;
 }
 
 } // namespace duckdb

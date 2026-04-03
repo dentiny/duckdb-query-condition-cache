@@ -1,68 +1,66 @@
 # name: test/sql/condition_cache_auto.test
-# description: Test automatic query condition cache build and apply
+# description: Test automatic cache build via optimizer
 # group: [sql]
 
 require query_condition_cache
 
-# Start with cache disabled
 statement ok
 SET use_query_condition_cache = false;
 
-# Create table with multiple row groups (>122880 rows)
 statement ok
 CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
 
-# Without setting, normal query works
 query I
 SELECT count(*) FROM t WHERE val = 42;
 ----
 5000
 
-# Enable automatic cache
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+0	0	0	0
+
 statement ok
 SET use_query_condition_cache = true;
 
-# First query with setting ON: builds cache and returns correct results
 query I
 SELECT count(*) FROM t WHERE val = 42;
 ----
 5000
 
-# Second query (cache hit): same correct results
-query I
-SELECT count(*) FROM t WHERE val = 42;
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
-5000
+5	5	245	245
 
-# Selective predicate: different cache entry, correct results
 query I
 SELECT count(*) FROM t WHERE id < 3000;
 ----
 3000
 
-# Multiple predicates (AND)
-query I
-SELECT count(*) FROM t WHERE val = 42 AND id < 200000;
+query IIII
+SELECT * FROM condition_cache_info('t', 'id < 3000');
 ----
-2000
+1	5	2	245
 
-# Setting can be toggled off
 statement ok
 SET use_query_condition_cache = false;
 
-# With setting off, queries still return correct results (no automatic behavior)
 query I
 SELECT count(*) FROM t WHERE val = 99;
 ----
 5000
 
-# Manual condition_cache_build still works regardless of setting
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 99');
+----
+0	0	0	0
+
 query I
 SELECT status FROM condition_cache_build('t', 'val = 99');
 ----
 Cache Built: 245/245 vectors, 5/5 row groups
 
-# Re-enable and test that previously manually built cache can be used
 statement ok
 SET use_query_condition_cache = true;
 
@@ -70,3 +68,8 @@ query I
 SELECT count(*) FROM t WHERE val = 99;
 ----
 5000
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 99');
+----
+5	5	245	245
