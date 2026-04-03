@@ -84,7 +84,7 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 // invalidation lookup when DML modifies the table.
 struct TableFilterKeyIndex : public ObjectCacheEntry {
 	concurrency::mutex lock;
-	vector<string> filter_keys DUCKDB_GUARDED_BY(lock);
+	unordered_set<string> filter_keys DUCKDB_GUARDED_BY(lock);
 
 	static string ObjectType() {
 		return "query_condition_cache_filter_key_index";
@@ -98,10 +98,12 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 		return optional_idx {};
 	}
 
+	// Add a filter key. No-op if it already exists (deduplication).
 	void Add(const string &filter_key);
+	// Remove a filter key. No-op if it doesn't exist.
 	void Remove(const string &filter_key);
 	bool IsEmpty();
-	vector<string> GetAll();
+	unordered_set<string> GetAll();
 };
 
 // Stored in DuckDB's per-database ObjectCache

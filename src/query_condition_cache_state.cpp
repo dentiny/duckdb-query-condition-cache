@@ -83,24 +83,12 @@ CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
 
 void TableFilterKeyIndex::Add(const string &filter_key) {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	for (const auto &existing : filter_keys) {
-		if (existing == filter_key) {
-			return;
-		}
-	}
-	filter_keys.push_back(filter_key);
+	filter_keys.insert(filter_key);
 }
 
 void TableFilterKeyIndex::Remove(const string &filter_key) {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	for (idx_t idx = 0; idx < filter_keys.size(); ++idx) {
-		if (filter_keys[idx] == filter_key) {
-			// Swap with last element to pop_back
-			std::swap(filter_keys[idx], filter_keys.back());
-			filter_keys.pop_back();
-			return;
-		}
-	}
+	filter_keys.erase(filter_key);
 }
 
 bool TableFilterKeyIndex::IsEmpty() {
@@ -108,7 +96,7 @@ bool TableFilterKeyIndex::IsEmpty() {
 	return filter_keys.empty();
 }
 
-vector<string> TableFilterKeyIndex::GetAll() {
+unordered_set<string> TableFilterKeyIndex::GetAll() {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return filter_keys;
 }
@@ -166,16 +154,23 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 			index->Remove(filter_key);
 			continue;
 		}
+		concurrency::lock_guard<concurrency::mutex> entry_guard(entry->lock);
 		for (auto rg_idx : row_group_indices) {
-			if (entry->bitvectors.erase(rg_idx) > 0) {
-				++removed_count;
-			}
+			removed_count += entry->bitvectors.erase(rg_idx);
 		}
 		if (entry->bitvectors.empty()) {
 			cache.Delete(cache_key);
 			index->Remove(filter_key);
 		}
 	}
+
+	// Clean up cached_table_oids if all entries for this table are gone
+	if (index->IsEmpty()) {
+		cache.Delete(MakeFilterKeyIndexKey(table_oid));
+		concurrency::lock_guard<concurrency::mutex> guard(lock);
+		cached_table_oids.erase(table_oid);
+	}
+
 	return removed_count;
 }
 
