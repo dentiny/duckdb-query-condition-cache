@@ -61,7 +61,7 @@ struct CacheEntryStats {
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
-	concurrency::mutex lock;
+	mutable concurrency::mutex lock;
 	unordered_map<idx_t, RowGroupFilter> bitvectors DUCKDB_GUARDED_BY(lock); // rg_idx -> bitvector
 
 	static string ObjectType() {
