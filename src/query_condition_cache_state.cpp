@@ -40,6 +40,7 @@ void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
 // ------- CONDITION_CACHE_ENTRY -------
 
 optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
 	// Rough estimate: each RowGroupFilter is ~BITVECTOR_ARRAY_SIZE * 8 bytes
 	// Plus overhead for the map structure
 	idx_t estimated_size = sizeof(ConditionCacheEntry);
@@ -48,6 +49,7 @@ optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {
 }
 
 CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
 	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
 
 	idx_t qualifying_vectors = 0;
@@ -79,26 +81,114 @@ CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
 	};
 }
 
+void ConditionCacheEntry::EnsureRowGroup(idx_t rg_idx) {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	(void)bitvectors[rg_idx];
+}
+
+void ConditionCacheEntry::SetQualifyingVector(idx_t rg_idx, idx_t vec_idx) {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	bitvectors[rg_idx].SetVector(vec_idx);
+}
+
+void ConditionCacheEntry::MergeFrom(const ConditionCacheEntry &other) {
+	if (this == &other) {
+		return;
+	}
+	// Snapshot under `other`'s lock, then merge into `this` so we never hold both mutexes
+	// (avoids deadlock and satisfies -Wthread-safety-analysis).
+	vector<pair<idx_t, RowGroupFilter>> snapshot;
+	{
+		const concurrency::lock_guard<concurrency::mutex> guard(other.lock);
+		snapshot.reserve(other.bitvectors.size());
+		for (const auto &kv : other.bitvectors) {
+			snapshot.push_back(kv);
+		}
+	}
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	for (const auto &[rg_idx, filter] : snapshot) {
+		bitvectors[rg_idx].MergeFrom(filter);
+	}
+}
+
+bool ConditionCacheEntry::VectorPassesFilter(idx_t rg_idx, idx_t vec_idx) const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto it = bitvectors.find(rg_idx);
+	if (it == bitvectors.end()) {
+		return true;
+	}
+	return it->second.VectorHasRows(vec_idx);
+}
+
+bool ConditionCacheEntry::StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t max_rg) const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	for (idx_t rg = min_rg; rg <= max_rg; ++rg) {
+		auto it = bitvectors.find(rg);
+		if (it == bitvectors.end() || !it->second.IsEmpty()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+idx_t ConditionCacheEntry::RowGroupCount() const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	return bitvectors.size();
+}
+
+bool ConditionCacheEntry::HasRowGroup(idx_t rg_idx) const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	return bitvectors.find(rg_idx) != bitvectors.end();
+}
+
+bool ConditionCacheEntry::RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto it = bitvectors.find(rg_idx);
+	if (it == bitvectors.end()) {
+		return false;
+	}
+	return it->second.VectorHasRows(vec_idx);
+}
+
+bool ConditionCacheEntry::RowGroupIsCompletelyEmpty(idx_t rg_idx) const {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto it = bitvectors.find(rg_idx);
+	if (it == bitvectors.end()) {
+		return false;
+	}
+	return it->second.IsEmpty();
+}
+
+pair<idx_t, bool> ConditionCacheEntry::EraseRowGroups(const unordered_set<idx_t> &row_group_indices) {
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	idx_t removed = 0;
+	for (auto rg_idx : row_group_indices) {
+		removed += bitvectors.erase(rg_idx);
+	}
+	return {removed, bitvectors.empty()};
+}
+
 // ------- TABLE_FILTER_KEY_INDEX -------
 
 void TableFilterKeyIndex::Add(const string &filter_key) {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
 	filter_keys.insert(filter_key);
 }
 
 void TableFilterKeyIndex::Remove(const string &filter_key) {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	D_ASSERT(filter_keys.count(filter_key) > 0);
-	filter_keys.erase(filter_key);
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto it = filter_keys.find(filter_key);
+	ALWAYS_ASSERT(it != filter_keys.end());
+	filter_keys.erase(it);
 }
 
 bool TableFilterKeyIndex::IsEmpty() {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return filter_keys.empty();
 }
 
 unordered_set<string> TableFilterKeyIndex::GetAll() {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return filter_keys;
 }
 
@@ -130,7 +220,7 @@ void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, sh
 	index->Add(key.filter_key);
 
 	// Track table OID for ClearAll
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
 	cached_table_oids.insert(key.table_oid);
 }
 
@@ -155,11 +245,9 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 			index->Remove(filter_key);
 			continue;
 		}
-		concurrency::lock_guard<concurrency::mutex> entry_guard(entry->lock);
-		for (auto rg_idx : row_group_indices) {
-			removed_count += entry->bitvectors.erase(rg_idx);
-		}
-		if (entry->bitvectors.empty()) {
+		auto erased = entry->EraseRowGroups(row_group_indices);
+		removed_count += erased.first;
+		if (erased.second) {
 			cache.Delete(cache_key);
 			index->Remove(filter_key);
 		}
@@ -168,7 +256,7 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 	// Clean up cached_table_oids if all entries for this table are gone
 	if (index->IsEmpty()) {
 		cache.Delete(MakeFilterKeyIndexKey(table_oid));
-		concurrency::lock_guard<concurrency::mutex> guard(lock);
+		const concurrency::lock_guard<concurrency::mutex> guard(lock);
 		cached_table_oids.erase(table_oid);
 	}
 
@@ -184,7 +272,7 @@ bool ConditionCacheStore::HasEntriesForTable(ClientContext &context, idx_t table
 void ConditionCacheStore::ClearAll(ClientContext &context) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	const concurrency::lock_guard<concurrency::mutex> guard(lock);
 	for (auto table_oid : cached_table_oids) {
 		auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
 		if (!index) {

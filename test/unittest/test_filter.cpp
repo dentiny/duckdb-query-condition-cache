@@ -11,10 +11,10 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 	// Build a cache entry with qualifying vectors in row group 0 and 2,
 	// and an explicitly cached empty row group 1.
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
-	entry->bitvectors[0].SetVector(0);
-	entry->bitvectors[0].SetVector(5);
-	entry->bitvectors[1];
-	entry->bitvectors[2].SetVector(10);
+	entry->SetQualifyingVector(/*rg_idx=*/0, /*vec_idx=*/0);
+	entry->SetQualifyingVector(/*rg_idx=*/0, /*vec_idx=*/5);
+	entry->EnsureRowGroup(/*rg_idx=*/1);
+	entry->SetQualifyingVector(/*rg_idx=*/2, /*vec_idx=*/10);
 
 	// Create a dummy expression for the filter (won't be evaluated in stats check)
 	auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);

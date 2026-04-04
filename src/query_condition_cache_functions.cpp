@@ -142,8 +142,8 @@ public:
 					continue; // skip transaction-local storage rows
 				}
 				idx_t row_group_idx = first_row_id / DEFAULT_ROW_GROUP_SIZE;
-				// Access to instantiate default RowGroupFilter for this row group
-				(void)local_entry.bitvectors[row_group_idx];
+				// Instantiate default RowGroupFilter for this row group so fully excluded row groups are recorded.
+				local_entry.EnsureRowGroup(row_group_idx);
 
 				SelectionVector sel(chunk.size());
 				idx_t match_count = expr_executor.SelectExpression(chunk, sel);
@@ -156,7 +156,7 @@ public:
 					auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
 					idx_t rg_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
 					idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-					local_entry.bitvectors[rg_idx].SetVector(vector_idx);
+					local_entry.SetQualifyingVector(/*rg_idx=*/rg_idx, /*vec_idx=*/vector_idx);
 				}
 			}
 		}
@@ -177,6 +177,14 @@ private:
 	idx_t rowid_col_idx;
 	ConditionCacheEntry &local_entry;
 };
+
+// Merge phase runs single-threaded; parallel workers each own disjoint local_entries[i].
+static void MergeLocalCacheEntries(const vector<ConditionCacheEntry> &local_entries,
+                                   const shared_ptr<ConditionCacheEntry> &entry) {
+	for (const auto &local : local_entries) {
+		entry->MergeFrom(local);
+	}
+}
 
 } // namespace
 
@@ -248,11 +256,7 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 
 	// Merge local entries into final result
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
-	for (const auto &local : local_entries) {
-		for (const auto &[rg_idx, filter] : local.bitvectors) {
-			entry->bitvectors[rg_idx].MergeFrom(filter);
-		}
-	}
+	MergeLocalCacheEntries(local_entries, entry);
 
 	return entry;
 }

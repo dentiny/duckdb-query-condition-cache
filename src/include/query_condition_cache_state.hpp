@@ -61,9 +61,6 @@ struct CacheEntryStats {
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
-	mutable concurrency::mutex lock;
-	unordered_map<idx_t, RowGroupFilter> bitvectors DUCKDB_GUARDED_BY(lock); // rg_idx -> bitvector
-
 	static string ObjectType() {
 		return "query_condition_cache_entry";
 	}
@@ -77,6 +74,32 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 
 	// Compute statistics about qualifying vectors and row groups
 	CacheEntryStats ComputeStats(idx_t total_rows) const;
+
+	// Ensure a row group key exists (empty filter). Used when recording fully excluded row groups.
+	void EnsureRowGroup(idx_t rg_idx);
+	// Mark that vector `vec_idx` within row group `rg_idx` has at least one qualifying row.
+	void SetQualifyingVector(idx_t rg_idx, idx_t vec_idx);
+	// Merge another entry's row-group filters into this entry (used after parallel build).
+	void MergeFrom(const ConditionCacheEntry &other);
+
+	// Row group absent from cache, or vector has qualifying rows -> predicate may pass rows.
+	bool VectorPassesFilter(idx_t rg_idx, idx_t vec_idx) const;
+
+	// True iff every row group in [min_rg, max_rg] is present in the cache and has an empty filter.
+	bool StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t max_rg) const;
+
+	idx_t RowGroupCount() const;
+	bool HasRowGroup(idx_t rg_idx) const;
+	bool RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const;
+	// True iff `rg_idx` is cached and its filter is empty (no qualifying vectors).
+	bool RowGroupIsCompletelyEmpty(idx_t rg_idx) const;
+
+	// Erase row group keys; returns (number of keys removed, whether the map is now empty).
+	pair<idx_t, bool> EraseRowGroups(const unordered_set<idx_t> &row_group_indices);
+
+private:
+	mutable concurrency::mutex lock;
+	unordered_map<idx_t, RowGroupFilter> bitvectors DUCKDB_GUARDED_BY(lock); // rg_idx -> bitvector
 };
 
 // Per-table index stored in ObjectCache (non-evictable). Tracks which
