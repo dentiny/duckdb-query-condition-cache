@@ -1,5 +1,6 @@
 #include "query_condition_cache_optimizer.hpp"
 
+#include "query_condition_cache_filter.hpp"
 #include "predicate_key_utils.hpp"
 #include "query_condition_cache_functions.hpp"
 #include "query_condition_cache_state.hpp"
@@ -8,7 +9,10 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
@@ -143,9 +147,78 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 	return BuildCacheEntry(context, table_entry, *bound_expr);
 }
 
-// TODO: Implement PostOptimizeWalk + InjectCacheFilter to inject cache filters
-// into LogicalGet nodes using cache_apply_pending entries.
+void QueryConditionCacheOptimizer::PostOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                                    CacheOptimizerQueryState &state) {
+	for (auto &child : plan->children) {
+		PostOptimizeWalk(context, child, state);
+	}
+
+	if (plan->type != LogicalOperatorType::LOGICAL_GET) {
+		return;
+	}
+
+	auto &get = plan->Cast<LogicalGet>();
+	auto entry = state.cache_apply_pending.find(get.table_index);
+	if (entry == state.cache_apply_pending.end()) {
+		return;
+	}
+
+	InjectCacheFilter(context, get, entry->second);
+	state.cache_apply_pending.erase(entry);
+}
+
+void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, LogicalGet &get,
+                                                     const shared_ptr<ConditionCacheEntry> &entry) {
+	auto &column_ids = get.GetMutableColumnIds();
+	bool has_row_id = false;
+	for (const auto &column_id : column_ids) {
+		if (column_id.IsRowIdColumn()) {
+			has_row_id = true;
+			break;
+		}
+	}
+	if (!has_row_id) {
+		if (get.projection_ids.empty() && !column_ids.empty()) {
+			get.projection_ids.reserve(column_ids.size());
+			for (idx_t i = 0; i < column_ids.size(); i++) {
+				get.projection_ids.push_back(i);
+			}
+		}
+		column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	}
+
+	vector<unique_ptr<Expression>> arguments;
+	arguments.push_back(make_uniq<BoundReferenceExpression>(LogicalType::ROW_TYPE, 0U));
+
+	FunctionBinder binder(context);
+	ErrorData error;
+	auto filter_expr =
+	    binder.BindScalarFunction(DEFAULT_SCHEMA, "__condition_cache_filter", std::move(arguments), error);
+	if (!filter_expr) {
+		error.Throw();
+	}
+	if (filter_expr->GetExpressionType() != ExpressionType::BOUND_FUNCTION) {
+		throw InternalException("Expected __condition_cache_filter to bind to a scalar function expression");
+	}
+
+	auto &function_expr = filter_expr->Cast<BoundFunctionExpression>();
+	function_expr.bind_info = make_uniq<ConditionCacheFilterBindData>(entry);
+
+	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
+	                             make_uniq<CacheExpressionFilter>(std::move(filter_expr), entry));
+}
+
 void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	if (!IsSettingEnabled(input.context)) {
+		return;
+	}
+
+	auto query_state = input.context.registered_state->Get<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
+	if (!query_state || query_state->cache_apply_pending.empty()) {
+		return;
+	}
+
+	PostOptimizeWalk(input.context, plan, *query_state);
 }
 
 } // namespace duckdb
