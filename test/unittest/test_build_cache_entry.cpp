@@ -16,7 +16,6 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 
-	// Create table with enough rows to span multiple row groups
 	con.Query("CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i)");
 
 	auto &context = *con.context;
@@ -30,14 +29,13 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
 		bound_expr =
 		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(entry->bitvectors.size() == 5); // 5 row groups
+		REQUIRE(entry->RowGroupCount() == 5);
 	}
 
 	SECTION("selective predicate") {
@@ -47,18 +45,17 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
 		bound_expr =
 		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(entry->bitvectors.size() == 5); // all row groups are cached
-		REQUIRE(entry->bitvectors.at(0).VectorHasRows(0));
-		REQUIRE(entry->bitvectors.at(0).VectorHasRows(1));
-		REQUIRE_FALSE(entry->bitvectors.at(0).VectorHasRows(2));
-		REQUIRE(entry->bitvectors.at(1).IsEmpty());
+		REQUIRE(entry->RowGroupCount() == 5);
+		REQUIRE(entry->RowGroupVectorHasQualifyingRows(0, 0));
+		REQUIRE(entry->RowGroupVectorHasQualifyingRows(0, 1));
+		REQUIRE_FALSE(entry->RowGroupVectorHasQualifyingRows(0, 2));
+		REQUIRE(entry->RowGroupIsCompletelyEmpty(1));
 	}
 
 	SECTION("odd values pass, even values don't") {
@@ -68,15 +65,13 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
 		bound_expr =
 		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		// Odd values exist in every row group, so all 5 row groups should be present
-		REQUIRE(entry->bitvectors.size() == 5);
+		REQUIRE(entry->RowGroupCount() == 5);
 	}
 
 	SECTION("no matching rows") {
@@ -86,16 +81,15 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
 		auto bound_expr = check_binder.Bind(parsed_exprs[0]);
 
-		// CheckBinder always sets target_type = INTEGER, so re-cast to BOOLEAN
 		bound_expr =
 		    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
 
 		auto entry = BuildCacheEntry(context, table_entry, *bound_expr);
 
 		REQUIRE(entry != nullptr);
-		REQUIRE(entry->bitvectors.size() == 5);
-		REQUIRE(entry->bitvectors.at(0).IsEmpty());
-		REQUIRE(entry->bitvectors.at(4).IsEmpty());
+		REQUIRE(entry->RowGroupCount() == 5);
+		REQUIRE(entry->RowGroupIsCompletelyEmpty(0));
+		REQUIRE(entry->RowGroupIsCompletelyEmpty(4));
 	}
 }
 } // namespace duckdb

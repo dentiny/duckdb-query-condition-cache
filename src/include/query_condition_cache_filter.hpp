@@ -10,7 +10,7 @@
 namespace duckdb {
 
 // Holds a shared_ptr to the ConditionCacheEntry so the filter function
-// and CheckStatistics can access the bitvectors during execution.
+// and CheckStatistics can query the cache via ConditionCacheEntry's thread-safe API.
 struct ConditionCacheFilterBindData : public FunctionData {
 	shared_ptr<ConditionCacheEntry> cache_entry;
 
