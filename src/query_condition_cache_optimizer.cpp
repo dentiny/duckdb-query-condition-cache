@@ -9,7 +9,6 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
@@ -187,22 +186,12 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, Log
 		column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
 	}
 
-	vector<unique_ptr<Expression>> arguments;
-	arguments.push_back(make_uniq<BoundReferenceExpression>(LogicalType::ROW_TYPE, 0U));
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0U));
 
-	FunctionBinder binder(context);
-	ErrorData error;
-	auto filter_expr =
-	    binder.BindScalarFunction(DEFAULT_SCHEMA, "__condition_cache_filter", std::move(arguments), error);
-	if (!filter_expr) {
-		error.Throw();
-	}
-	if (filter_expr->GetExpressionType() != ExpressionType::BOUND_FUNCTION) {
-		throw InternalException("Expected __condition_cache_filter to bind to a scalar function expression");
-	}
-
-	auto &function_expr = filter_expr->Cast<BoundFunctionExpression>();
-	function_expr.bind_info = make_uniq<ConditionCacheFilterBindData>(entry);
+	auto filter_expr = make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN},
+	                                                      ConditionCacheFilterFunction(), std::move(children),
+	                                                      make_uniq<ConditionCacheFilterBindData>(entry));
 
 	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
 	                             make_uniq<CacheExpressionFilter>(std::move(filter_expr), entry));
