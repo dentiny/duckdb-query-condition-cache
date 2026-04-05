@@ -86,7 +86,7 @@ void RemapColumnIndices(Expression &expr, const unordered_map<column_t, idx_t> &
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 		auto &ref = expr.Cast<BoundReferenceExpression>();
 		auto it = mapping.find(ref.index);
-		D_ASSERT(it != mapping.end());
+		ALWAYS_ASSERT(it != mapping.end());
 		ref.index = it->second;
 	}
 	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { RemapColumnIndices(child, mapping); });

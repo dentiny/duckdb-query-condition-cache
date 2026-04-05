@@ -1,5 +1,6 @@
 #include "query_condition_cache_filter.hpp"
 
+#include "duckdb/common/assert.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -33,8 +34,8 @@ unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, 
 }
 
 void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &result) {
-	D_ASSERT(args.size() > 0);
-	D_ASSERT(args.ColumnCount() > 0);
+	ALWAYS_ASSERT(args.size() > 0);
+	ALWAYS_ASSERT(args.ColumnCount() > 0);
 	auto &bind_data = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<ConditionCacheFilterBindData>();
 	auto &entry = bind_data.cache_entry;
 
