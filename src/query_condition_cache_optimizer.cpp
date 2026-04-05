@@ -189,9 +189,9 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, Log
 	vector<unique_ptr<Expression>> children;
 	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0U));
 
-	auto filter_expr = make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN},
-	                                                      ConditionCacheFilterFunction(), std::move(children),
-	                                                      make_uniq<ConditionCacheFilterBindData>(entry));
+	auto filter_expr =
+	    make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFunction(),
+	                                       std::move(children), make_uniq<ConditionCacheFilterBindData>(entry));
 
 	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
 	                             make_uniq<CacheExpressionFilter>(std::move(filter_expr), entry));
