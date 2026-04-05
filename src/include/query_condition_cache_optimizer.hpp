@@ -51,6 +51,14 @@ private:
 	static shared_ptr<ConditionCacheEntry>
 	BuildCacheForPredicate(ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get);
 
+	// Walk plan after built-in optimization and inject cache filters into matching table scans.
+	static void PostOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+	                             CacheOptimizerQueryState &state);
+
+	// Inject a rowid-backed cache filter into a LogicalGet while preserving its visible output.
+	static void InjectCacheFilter(ClientContext &context, LogicalGet &get,
+	                              const shared_ptr<ConditionCacheEntry> &entry);
+
 	// Reconstruct SQL from filter expressions, sort for alphabetical ordering
 	static string ReconstructPredicateSQL(const vector<unique_ptr<Expression>> &expressions);
 };

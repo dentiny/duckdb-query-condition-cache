@@ -28,6 +28,9 @@ unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, Scalar
 unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, const BoundFunctionExpression &expr,
                                                         FunctionData *bind_data);
 
+// Factory for the internal scalar filter ConditionCacheFilterFn used by optimizer-injected cache checks.
+ScalarFunction ConditionCacheFilterFunction();
+
 // Vector-level filter: takes a ROW_ID column as input, looks up the bitvector
 // for that row group + vector index, and returns a constant BOOLEAN for the
 // entire vector. Defaults to true for row groups not in cache.

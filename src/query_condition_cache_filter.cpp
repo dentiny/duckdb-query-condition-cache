@@ -33,6 +33,12 @@ unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, 
 	return make_uniq<ConditionCacheFilterState>();
 }
 
+ScalarFunction ConditionCacheFilterFunction() {
+	return ScalarFunction("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
+	                      LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn, ConditionCacheFilterBind,
+	                      nullptr, nullptr, ConditionCacheFilterInit);
+}
+
 void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &result) {
 	ALWAYS_ASSERT(args.size() > 0);
 	ALWAYS_ASSERT(args.ColumnCount() > 0);

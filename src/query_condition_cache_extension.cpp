@@ -28,10 +28,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheInfoFunction());
 
 	// Register the internal filter function so it survives plan serialization/verification
-	ScalarFunction cache_filter_func("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
-	                                 LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn,
-	                                 ConditionCacheFilterBind, nullptr, nullptr, ConditionCacheFilterInit);
-	loader.RegisterFunction(cache_filter_func);
+	loader.RegisterFunction(ConditionCacheFilterFunction());
 
 	// Register the use_query_condition_cache setting (default: true)
 	auto &db = loader.GetDatabaseInstance();
