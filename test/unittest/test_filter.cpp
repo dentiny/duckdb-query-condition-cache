@@ -13,7 +13,9 @@
 
 namespace duckdb {
 
-static optional_ptr<LogicalGet> FindLogicalGet(LogicalOperator &op) {
+namespace {
+
+optional_ptr<LogicalGet> FindLogicalGet(LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		return op.Cast<LogicalGet>();
 	}
@@ -25,6 +27,8 @@ static optional_ptr<LogicalGet> FindLogicalGet(LogicalOperator &op) {
 	}
 	return nullptr;
 }
+
+} // namespace
 
 TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") {
 	// Build a cache entry with qualifying vectors in row group 0 and 2,

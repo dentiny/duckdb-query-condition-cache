@@ -28,6 +28,7 @@ unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, Scalar
 unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, const BoundFunctionExpression &expr,
                                                         FunctionData *bind_data);
 
+// Factory for the internal scalar filter ConditionCacheFilterFn used by optimizer-injected cache checks.
 ScalarFunction ConditionCacheFilterFunction();
 
 // Vector-level filter: takes a ROW_ID column as input, looks up the bitvector
