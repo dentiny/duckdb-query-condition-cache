@@ -29,18 +29,24 @@ void CollectRowGroups(Vector &row_id_vec, idx_t count, CacheInvalidatorGlobalSta
 	row_id_vec.ToUnifiedFormat(count, row_id_data);
 	auto row_ids = UnifiedVectorFormat::GetData<row_t>(row_id_data);
 
-	concurrency::lock_guard<concurrency::mutex> guard(state.lock);
+	// Collect locally first to minimize critical section
+	unordered_set<idx_t> local_row_groups;
+	idx_t local_inserted = 0;
 	for (idx_t ii = 0; ii < count; ++ii) {
 		auto sel_idx = row_id_data.sel->get_index(ii);
 		if (!row_id_data.validity.RowIsValid(sel_idx)) {
 			if (track_nulls) {
-				++state.inserted_row_count;
+				++local_inserted;
 			}
 			continue;
 		}
 		auto row_id = NumericCast<idx_t>(row_ids[sel_idx]);
-		state.affected_row_groups.insert(row_id / DEFAULT_ROW_GROUP_SIZE);
+		local_row_groups.insert(row_id / DEFAULT_ROW_GROUP_SIZE);
 	}
+
+	concurrency::lock_guard<concurrency::mutex> guard(state.lock);
+	state.affected_row_groups.insert(local_row_groups.begin(), local_row_groups.end());
+	state.inserted_row_count += local_inserted;
 }
 
 } // namespace
@@ -83,6 +89,8 @@ OperatorFinalResultType PhysicalCacheInvalidator::OperatorFinalize(Pipeline &pip
 	if (invalidator_state.inserted_row_count > 0) {
 		idx_t first_rg = pre_insert_row_count / DEFAULT_ROW_GROUP_SIZE;
 		idx_t last_rg = (pre_insert_row_count + invalidator_state.inserted_row_count - 1) / DEFAULT_ROW_GROUP_SIZE;
+		invalidator_state.affected_row_groups.reserve(invalidator_state.affected_row_groups.size() +
+		                                              (last_rg - first_rg + 1));
 		for (idx_t rg = first_rg; rg <= last_rg; ++rg) {
 			invalidator_state.affected_row_groups.insert(rg);
 		}
