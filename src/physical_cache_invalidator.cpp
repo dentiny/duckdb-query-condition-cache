@@ -53,7 +53,8 @@ OperatorResultType PhysicalCacheInvalidator::Execute(ExecutionContext &context, 
 	auto &invalidator_state = gstate.Cast<CacheInvalidatorGlobalState>();
 
 	switch (mode) {
-	case CacheInvalidatorMode::ROW_ID:
+	case CacheInvalidatorMode::DELETE:
+	case CacheInvalidatorMode::UPDATE:
 		CollectRowGroups(input.data[row_id_column_index], input.size(), invalidator_state, /*track_nulls=*/false);
 		break;
 	case CacheInvalidatorMode::INSERT: {
@@ -111,8 +112,12 @@ InsertionOrderPreservingMap<string> PhysicalCacheInvalidator::ParamsToString() c
 	InsertionOrderPreservingMap<string> result;
 	result["Table OID"] = to_string(table_oid);
 	switch (mode) {
-	case CacheInvalidatorMode::ROW_ID:
-		result["Mode"] = "ROW_ID";
+	case CacheInvalidatorMode::DELETE:
+		result["Mode"] = "DELETE";
+		result["Row ID Column"] = to_string(row_id_column_index);
+		break;
+	case CacheInvalidatorMode::UPDATE:
+		result["Mode"] = "UPDATE";
 		result["Row ID Column"] = to_string(row_id_column_index);
 		break;
 	case CacheInvalidatorMode::INSERT:

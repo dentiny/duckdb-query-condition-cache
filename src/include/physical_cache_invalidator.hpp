@@ -8,11 +8,12 @@
 namespace duckdb {
 
 enum class CacheInvalidatorMode : uint8_t {
-	// DELETE/UPDATE: observe row IDs at row_id_column_index
-	ROW_ID,
-	// INSERT: count rows and compute affected range from pre_insert_row_count
+	// Observe row IDs at row_id_column_index to find affected row groups
+	DELETE,
+	UPDATE,
+	// Count rows and compute affected range from pre_insert_row_count
 	INSERT,
-	// MERGE: hybrid -- track row IDs for matched rows (UPDATE/DELETE) and count
+	// Hybrid: track row IDs for matched rows (UPDATE/DELETE) and count
 	// unmatched rows (INSERT) to compute the insert range
 	MERGE
 };
@@ -37,7 +38,7 @@ public:
 
 	idx_t table_oid;
 	CacheInvalidatorMode mode;
-	// Column index within input chunks that contains row IDs (ROW_ID/MERGE modes only)
+	// Column index within input chunks that contains row IDs (DELETE/UPDATE/MERGE modes only)
 	idx_t row_id_column_index;
 	// Number of rows in the table before this DML (INSERT/MERGE modes only)
 	idx_t pre_insert_row_count;
