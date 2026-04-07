@@ -12,6 +12,7 @@ set(QUERY_CACHE_UNITTEST_OBJECTS
     test_cache_invalidation.cpp
     test_cache_store.cpp
     test_filter.cpp
+    test_helpers_invalidation.cpp
     test_normalize_expression.cpp
     test_physical_cache_invalidator.cpp)
 

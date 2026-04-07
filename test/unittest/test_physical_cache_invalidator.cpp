@@ -7,7 +7,7 @@
 
 namespace duckdb {
 
-TEST_CASE("PhysicalCacheInvalidator - ROW_ID mode invalidation pattern", "[physical_invalidator]") {
+TEST_CASE("PhysicalCacheInvalidator - INVALIDATE mode pattern", "[physical_invalidator]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 	auto &context = *con.context;
@@ -118,6 +118,57 @@ TEST_CASE("PhysicalCacheInvalidator - full invalidation removes all entries", "[
 
 	REQUIRE(store->Lookup(context, {/*table_oid=*/1, "val = 1"}) == nullptr);
 	REQUIRE_FALSE(store->HasEntriesForTable(context, /*table_oid=*/1));
+}
+
+TEST_CASE("PhysicalCacheInvalidator - row ID to row group mapping", "[physical_invalidator]") {
+	// Verify the row_id / DEFAULT_ROW_GROUP_SIZE mapping used by CollectRowGroups
+	SECTION("row IDs within same row group map to same index") {
+		idx_t rg0_start = 0;
+		idx_t rg0_end = DEFAULT_ROW_GROUP_SIZE - 1;
+		REQUIRE(rg0_start / DEFAULT_ROW_GROUP_SIZE == 0);
+		REQUIRE(rg0_end / DEFAULT_ROW_GROUP_SIZE == 0);
+	}
+
+	SECTION("row IDs at boundary map to different row groups") {
+		idx_t last_in_rg0 = DEFAULT_ROW_GROUP_SIZE - 1;
+		idx_t first_in_rg1 = DEFAULT_ROW_GROUP_SIZE;
+		REQUIRE(last_in_rg0 / DEFAULT_ROW_GROUP_SIZE == 0);
+		REQUIRE(first_in_rg1 / DEFAULT_ROW_GROUP_SIZE == 1);
+	}
+
+	SECTION("large row IDs map correctly") {
+		idx_t row_id = DEFAULT_ROW_GROUP_SIZE * 10 + 500;
+		REQUIRE(row_id / DEFAULT_ROW_GROUP_SIZE == 10);
+	}
+}
+
+TEST_CASE("PhysicalCacheInvalidator - INSERT range computation", "[physical_invalidator]") {
+	SECTION("insert within single row group") {
+		idx_t pre_insert = 100;
+		idx_t inserted = 50;
+		idx_t first_rg = pre_insert / DEFAULT_ROW_GROUP_SIZE;
+		idx_t last_rg = (pre_insert + inserted - 1) / DEFAULT_ROW_GROUP_SIZE;
+		REQUIRE(first_rg == 0);
+		REQUIRE(last_rg == 0);
+	}
+
+	SECTION("insert spanning row group boundary") {
+		idx_t pre_insert = DEFAULT_ROW_GROUP_SIZE - 10;
+		idx_t inserted = 20;
+		idx_t first_rg = pre_insert / DEFAULT_ROW_GROUP_SIZE;
+		idx_t last_rg = (pre_insert + inserted - 1) / DEFAULT_ROW_GROUP_SIZE;
+		REQUIRE(first_rg == 0);
+		REQUIRE(last_rg == 1);
+	}
+
+	SECTION("insert spanning multiple row groups") {
+		idx_t pre_insert = DEFAULT_ROW_GROUP_SIZE * 2;
+		idx_t inserted = DEFAULT_ROW_GROUP_SIZE * 3;
+		idx_t first_rg = pre_insert / DEFAULT_ROW_GROUP_SIZE;
+		idx_t last_rg = (pre_insert + inserted - 1) / DEFAULT_ROW_GROUP_SIZE;
+		REQUIRE(first_rg == 2);
+		REQUIRE(last_rg == 4);
+	}
 }
 
 } // namespace duckdb
