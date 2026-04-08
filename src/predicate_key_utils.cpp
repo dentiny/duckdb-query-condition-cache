@@ -54,14 +54,23 @@ void NormalizeExpressionForCacheKey(Expression &expr) {
 		return;
 	}
 
-	// Sort conjunction children for canonical ordering
-	// TODO: ToString() is called O(NlogN) times during sort
+	// Sort conjunction children for canonical ordering.
+	// Pre-compute ToString() for each child.
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
 		auto &conj = expr.Cast<BoundConjunctionExpression>();
-		sort(conj.children.begin(), conj.children.end(),
-		     [](const unique_ptr<Expression> &a, const unique_ptr<Expression> &b) {
-			     return a->ToString() < b->ToString();
-		     });
+		vector<pair<string, idx_t>> keyed;
+		keyed.reserve(conj.children.size());
+		for (idx_t i = 0; i < conj.children.size(); ++i) {
+			keyed.emplace_back(conj.children[i]->ToString(), i);
+		}
+		sort(keyed.begin(), keyed.end(),
+		     [](const pair<string, idx_t> &a, const pair<string, idx_t> &b) { return a.first < b.first; });
+		vector<unique_ptr<Expression>> sorted_children;
+		sorted_children.reserve(keyed.size());
+		for (auto &[str, idx] : keyed) {
+			sorted_children.push_back(std::move(conj.children[idx]));
+		}
+		conj.children = std::move(sorted_children);
 	}
 }
 

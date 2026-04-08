@@ -129,7 +129,14 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 	// Remove a filter key. Assumes the key must appear in the set.
 	void Remove(const string &filter_key);
 	bool IsEmpty();
-	unordered_set<string> GetAll();
+	// Invoke callback for each filter key while holding the lock.
+	template <typename Fn>
+	void ForEach(Fn &&fn) {
+		concurrency::lock_guard<concurrency::mutex> guard(lock);
+		for (const auto &key : filter_keys) {
+			fn(key);
+		}
+	}
 };
 
 // Stored in DuckDB's per-database ObjectCache
