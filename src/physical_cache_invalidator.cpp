@@ -31,6 +31,7 @@ void CollectRowGroups(Vector &row_id_vec, idx_t count, CacheInvalidatorGlobalSta
 
 	// Collect locally first to minimize critical section
 	unordered_set<idx_t> local_row_groups;
+	local_row_groups.reserve(count);
 	idx_t local_inserted = 0;
 	for (idx_t ii = 0; ii < count; ++ii) {
 		auto sel_idx = row_id_data.sel->get_index(ii);

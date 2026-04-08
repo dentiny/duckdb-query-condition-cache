@@ -29,7 +29,7 @@ shared_ptr<ConditionCacheEntry> LookupEntry(Connection &con, idx_t table_oid, co
 void BuildCache(Connection &con, const string &table_name, const string &predicate) {
 	auto sql = StringUtil::Format("SELECT * FROM condition_cache_build('%s', '%s')", table_name, predicate);
 	auto result = con.Query(sql);
-	REQUIRE(result->GetError() == "");
+	REQUIRE_FALSE(result->HasError());
 }
 
 } // namespace duckdb
