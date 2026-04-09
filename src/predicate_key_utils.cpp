@@ -58,7 +58,7 @@ void NormalizeExpressionForCacheKey(Expression &expr) {
 	// Pre-compute ToString() for each child.
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
 		auto &conj = expr.Cast<BoundConjunctionExpression>();
-		vector<pair<string, idx_t>> keyed;
+		vector<pair<string, idx_t>> keyed; // (ToString() result, child index)
 		keyed.reserve(conj.children.size());
 		for (idx_t i = 0; i < conj.children.size(); ++i) {
 			keyed.emplace_back(conj.children[i]->ToString(), i);
