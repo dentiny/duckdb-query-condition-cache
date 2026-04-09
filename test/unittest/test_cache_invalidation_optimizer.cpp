@@ -16,6 +16,14 @@
 namespace duckdb {
 namespace {
 
+struct InvalidatorExpectation {
+	CacheInvalidatorMode mode;
+	idx_t table_oid;
+	idx_t pre_insert_row_count;
+	idx_t row_id_column_index;
+	idx_t expression_count;
+};
+
 unique_ptr<LogicalOperator> OptimizeQuery(Connection &con, const string &sql) {
 	Parser parser;
 	parser.ParseQuery(sql);
@@ -36,16 +44,14 @@ LogicalCacheInvalidator &GetOnlyInvalidatorChild(LogicalOperator &op) {
 	return op.children[0]->Cast<LogicalCacheInvalidator>();
 }
 
-void VerifyCopiedInvalidator(ClientContext &context, LogicalOperator &plan, CacheInvalidatorMode expected_mode,
-                             idx_t expected_table_oid, idx_t expected_pre_insert_rows,
-                             idx_t expected_row_id_column_index, idx_t expected_expression_count) {
+void VerifyCopiedInvalidator(ClientContext &context, LogicalOperator &plan, const InvalidatorExpectation &expected) {
 	auto copied = plan.Copy(context);
 	auto &copied_invalidator = GetOnlyInvalidatorChild(*copied);
-	REQUIRE(copied_invalidator.table_oid == expected_table_oid);
-	REQUIRE(copied_invalidator.mode == expected_mode);
-	REQUIRE(copied_invalidator.pre_insert_row_count == expected_pre_insert_rows);
-	REQUIRE(copied_invalidator.row_id_column_index == expected_row_id_column_index);
-	REQUIRE(copied_invalidator.expressions.size() == expected_expression_count);
+	REQUIRE(copied_invalidator.table_oid == expected.table_oid);
+	REQUIRE(copied_invalidator.mode == expected.mode);
+	REQUIRE(copied_invalidator.pre_insert_row_count == expected.pre_insert_row_count);
+	REQUIRE(copied_invalidator.row_id_column_index == expected.row_id_column_index);
+	REQUIRE(copied_invalidator.expressions.size() == expected.expression_count);
 }
 
 } // namespace
@@ -75,7 +81,7 @@ TEST_CASE("CacheInvalidationOptimizer injects logical invalidators for DML", "[i
 		REQUIRE(invalidator.expressions.size() == 1);
 		REQUIRE_FALSE(invalidator.expressions[0]->ToString().empty());
 
-		VerifyCopiedInvalidator(*con.context, *plan, CacheInvalidatorMode::INVALIDATE, table_oid, 0, 0, 1);
+		VerifyCopiedInvalidator(*con.context, *plan, {CacheInvalidatorMode::INVALIDATE, table_oid, 0, 0, 1});
 		con.context->transaction.Commit();
 	}
 
@@ -92,7 +98,7 @@ TEST_CASE("CacheInvalidationOptimizer injects logical invalidators for DML", "[i
 		REQUIRE(invalidator.expressions.size() == 1);
 		REQUIRE(row_id_ref.index + 1 == invalidator.children[0]->GetColumnBindings().size());
 
-		VerifyCopiedInvalidator(*con.context, *plan, CacheInvalidatorMode::INVALIDATE, table_oid, 0, 0, 1);
+		VerifyCopiedInvalidator(*con.context, *plan, {CacheInvalidatorMode::INVALIDATE, table_oid, 0, 0, 1});
 		con.context->transaction.Commit();
 	}
 
@@ -107,7 +113,7 @@ TEST_CASE("CacheInvalidationOptimizer injects logical invalidators for DML", "[i
 		REQUIRE(invalidator.row_id_column_index == 0);
 		REQUIRE(invalidator.expressions.empty());
 
-		VerifyCopiedInvalidator(*con.context, *plan, CacheInvalidatorMode::INSERT, table_oid, 3, 0, 0);
+		VerifyCopiedInvalidator(*con.context, *plan, {CacheInvalidatorMode::INSERT, table_oid, 3, 0, 0});
 		con.context->transaction.Commit();
 	}
 
@@ -125,7 +131,8 @@ TEST_CASE("CacheInvalidationOptimizer injects logical invalidators for DML", "[i
 		REQUIRE(invalidator.pre_insert_row_count == 3);
 		REQUIRE(invalidator.expressions.empty());
 
-		VerifyCopiedInvalidator(*con.context, *plan, CacheInvalidatorMode::MERGE, table_oid, 3, merge.row_id_start, 0);
+		VerifyCopiedInvalidator(*con.context, *plan,
+		                        {CacheInvalidatorMode::MERGE, table_oid, 3, merge.row_id_start, 0});
 		con.context->transaction.Commit();
 	}
 }

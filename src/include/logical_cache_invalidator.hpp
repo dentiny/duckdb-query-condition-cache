@@ -12,14 +12,14 @@ struct LogicalCacheInvalidator : public LogicalExtensionOperator {
 	idx_t pre_insert_row_count; // for INSERT/MERGE modes
 
 	// For DELETE/UPDATE: pass the row_id expression to be resolved during column binding.
-	LogicalCacheInvalidator(idx_t table_oid, unique_ptr<Expression> row_id_expr);
+	LogicalCacheInvalidator(idx_t table_oid_p, unique_ptr<Expression> row_id_expr_p);
 
 	// For INSERT: count rows and compute affected range.
-	LogicalCacheInvalidator(idx_t table_oid, idx_t pre_insert_row_count);
+	LogicalCacheInvalidator(idx_t table_oid_p, idx_t pre_insert_row_count_p);
 
 	// For MERGE: hybrid — track row IDs (at row_id_column_index) for matched rows
 	// and count unmatched rows for the insert range.
-	LogicalCacheInvalidator(idx_t table_oid, idx_t row_id_column_index, idx_t pre_insert_row_count);
+	LogicalCacheInvalidator(idx_t table_oid_p, idx_t row_id_column_index_p, idx_t pre_insert_row_count_p);
 
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override;
 	vector<ColumnBinding> GetColumnBindings() override;
@@ -34,7 +34,7 @@ protected:
 class CacheInvalidatorOperatorExtension : public OperatorExtension {
 public:
 	CacheInvalidatorOperatorExtension();
-	std::string GetName() override;
+	string GetName() override;
 	unique_ptr<LogicalExtensionOperator> Deserialize(Deserializer &deserializer) override;
 };
 

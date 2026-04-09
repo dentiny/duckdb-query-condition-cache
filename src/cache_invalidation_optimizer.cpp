@@ -45,7 +45,7 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 
 		// row_id is always the last column in an UPDATE's child output
 		auto row_id_col_idx = upd.children[0]->GetColumnBindings().size() - 1;
-		auto row_id_expr = make_uniq<BoundReferenceExpression>(LogicalType::BIGINT, row_id_col_idx);
+		auto row_id_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, row_id_col_idx);
 
 		auto invalidator = make_uniq<LogicalCacheInvalidator>(table_oid, std::move(row_id_expr));
 		invalidator->children = std::move(upd.children);

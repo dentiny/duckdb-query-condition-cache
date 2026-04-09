@@ -8,21 +8,22 @@
 namespace duckdb {
 
 // DELETE/UPDATE mode: row_id expression stored in expressions[0], resolved during column binding
-LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid, unique_ptr<Expression> row_id_expr)
-    : table_oid(table_oid), mode(CacheInvalidatorMode::INVALIDATE), row_id_column_index(0), pre_insert_row_count(0) {
-	expressions.push_back(std::move(row_id_expr));
+LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid_p, unique_ptr<Expression> row_id_expr_p)
+    : table_oid(table_oid_p), mode(CacheInvalidatorMode::INVALIDATE), row_id_column_index(0), pre_insert_row_count(0) {
+	expressions.push_back(std::move(row_id_expr_p));
 }
 
 // INSERT mode: count rows, no row_id tracking
-LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid, idx_t pre_insert_row_count)
-    : table_oid(table_oid), mode(CacheInvalidatorMode::INSERT), row_id_column_index(0),
-      pre_insert_row_count(pre_insert_row_count) {
+LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid_p, idx_t pre_insert_row_count_p)
+    : table_oid(table_oid_p), mode(CacheInvalidatorMode::INSERT), row_id_column_index(0),
+      pre_insert_row_count(pre_insert_row_count_p) {
 }
 
 // MERGE mode: track row IDs + count unmatched (inserted) rows
-LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid, idx_t row_id_column_index, idx_t pre_insert_row_count)
-    : table_oid(table_oid), mode(CacheInvalidatorMode::MERGE), row_id_column_index(row_id_column_index),
-      pre_insert_row_count(pre_insert_row_count) {
+LogicalCacheInvalidator::LogicalCacheInvalidator(idx_t table_oid_p, idx_t row_id_column_index_p,
+                                                 idx_t pre_insert_row_count_p)
+    : table_oid(table_oid_p), mode(CacheInvalidatorMode::MERGE), row_id_column_index(row_id_column_index_p),
+      pre_insert_row_count(pre_insert_row_count_p) {
 }
 
 PhysicalOperator &LogicalCacheInvalidator::CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) {
@@ -63,17 +64,21 @@ void LogicalCacheInvalidator::Serialize(Serializer &serializer) const {
 
 // --- CacheInvalidatorOperatorExtension ---
 
-static BoundStatement CacheInvalidatorBind(ClientContext &context, Binder &binder, OperatorExtensionInfo *info,
-                                           SQLStatement &statement) {
+namespace {
+
+BoundStatement CacheInvalidatorBind(ClientContext &context, Binder &binder, OperatorExtensionInfo *info,
+                                    SQLStatement &statement) {
 	// We don't bind any statements — return empty plan to signal "not handled"
 	return BoundStatement();
 }
+
+} // namespace
 
 CacheInvalidatorOperatorExtension::CacheInvalidatorOperatorExtension() {
 	Bind = CacheInvalidatorBind;
 }
 
-std::string CacheInvalidatorOperatorExtension::GetName() {
+string CacheInvalidatorOperatorExtension::GetName() {
 	return "query_condition_cache";
 }
 
@@ -93,7 +98,7 @@ unique_ptr<LogicalExtensionOperator> CacheInvalidatorOperatorExtension::Deserial
 		if (!exprs.empty()) {
 			row_id_expr = std::move(exprs[0]);
 		} else {
-			row_id_expr = make_uniq<BoundReferenceExpression>(LogicalType::BIGINT, row_id_col);
+			row_id_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, row_id_col);
 		}
 		result = make_uniq<LogicalCacheInvalidator>(oid, std::move(row_id_expr));
 		break;
