@@ -1,5 +1,7 @@
 #include "test_helpers_invalidation.hpp"
 
+#include "predicate_key_utils.hpp"
+
 #include "catch/catch.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
@@ -7,12 +9,17 @@
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
+namespace {
+
+DuckTableEntry &GetDuckTableEntry(ClientContext &context, const string &table_name) {
+	return Catalog::GetEntry<DuckTableEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA, table_name);
+}
+
+} // namespace
 
 idx_t GetTableOid(Connection &con, const string &table_name) {
 	con.BeginTransaction();
-	auto &context = *con.context;
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA, table_name);
-	auto oid = table_entry.oid;
+	auto oid = GetDuckTableEntry(*con.context, table_name).oid;
 	con.Commit();
 	return oid;
 }
@@ -24,6 +31,17 @@ shared_ptr<ConditionCacheStore> GetStore(Connection &con) {
 shared_ptr<ConditionCacheEntry> LookupEntry(Connection &con, idx_t table_oid, const string &predicate) {
 	auto store = GetStore(con);
 	return store->Lookup(*con.context, {table_oid, predicate});
+}
+
+shared_ptr<ConditionCacheEntry> LookupEntry(Connection &con, const string &table_name, const string &predicate) {
+	auto &context = *con.context;
+	con.BeginTransaction();
+	auto &table_entry = GetDuckTableEntry(context, table_name);
+	auto table_oid = table_entry.oid;
+	auto canonical_key = ComputeCanonicalPredicateKey(context, table_entry, predicate);
+	con.Commit();
+	auto store = GetStore(con);
+	return store->Lookup(context, {table_oid, canonical_key});
 }
 
 void BuildCache(Connection &con, const string &table_name, const string &predicate) {
