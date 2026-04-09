@@ -129,7 +129,8 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 	// Remove a filter key. Assumes the key must appear in the set.
 	void Remove(const string &filter_key);
 	bool IsEmpty();
-	unordered_set<string> GetAll();
+	// Transfer ownership of all filter keys out. Clears the internal set.
+	unordered_set<string> Take();
 };
 
 // Stored in DuckDB's per-database ObjectCache
