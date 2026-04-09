@@ -10,6 +10,7 @@ set(QUERY_CACHE_UNITTEST_OBJECTS
     test_bitvector.cpp
     test_build_cache_entry.cpp
     test_cache_invalidation.cpp
+    test_cache_invalidation_optimizer.cpp
     test_cache_store.cpp
     test_filter.cpp
     test_helpers_invalidation.cpp

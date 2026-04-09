@@ -10,3 +10,4 @@ test/python/__pycache__/
 .claude
 AGENTS.md
 CLAUDE.md
+.cache/
