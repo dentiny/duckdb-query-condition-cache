@@ -182,9 +182,9 @@ bool TableFilterKeyIndex::IsEmpty() {
 	return filter_keys.empty();
 }
 
-unordered_set<string> TableFilterKeyIndex::GetAll() {
+unordered_set<string> TableFilterKeyIndex::Take() {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	return filter_keys;
+	return std::move(filter_keys);
 }
 
 // ------- CONDITION_CACHE_STORE -------
@@ -225,7 +225,7 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 		return 0;
 	}
 
-	auto filter_keys = index->GetAll();
+	auto filter_keys = index->Take();
 	idx_t removed_count = 0;
 
 	for (const auto &filter_key : filter_keys) {
@@ -233,14 +233,14 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 		string cache_key = MakeCacheKeyString(key);
 		auto entry = cache.Get<ConditionCacheEntry>(cache_key);
 		if (!entry) {
-			index->Remove(filter_key);
 			continue;
 		}
 		auto erased = entry->EraseRowGroups(row_group_indices);
 		removed_count += erased.first;
 		if (erased.second) {
 			cache.Delete(cache_key);
-			index->Remove(filter_key);
+		} else {
+			index->Add(filter_key);
 		}
 	}
 
@@ -268,7 +268,7 @@ void ConditionCacheStore::ClearAll(ClientContext &context) {
 		if (!index) {
 			continue;
 		}
-		auto filter_keys = index->GetAll();
+		auto filter_keys = index->Take();
 		for (const auto &filter_key : filter_keys) {
 			cache.Delete(MakeCacheKeyString(CacheKey {table_oid, filter_key}));
 		}
