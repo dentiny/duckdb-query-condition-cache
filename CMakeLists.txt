@@ -20,6 +20,7 @@ endif()
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
+    src/physical_cache_invalidator.cpp
     src/predicate_key_utils.cpp
     src/query_condition_cache_extension.cpp
     src/query_condition_cache_filter.cpp
