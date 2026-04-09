@@ -11,10 +11,10 @@ statement ok
 CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(130000) t(i);
 
 statement ok
-SELECT * FROM condition_cache_build('t', 'val = 42');
+SELECT * FROM condition_cache_build('t', 'val = 42 AND id % 2 = 0');
 
 query I
-SELECT cached_row_groups FROM condition_cache_info('t', 'val = 42');
+SELECT cached_row_groups FROM condition_cache_info('t', 'val = 42 AND id % 2 = 0');
 ----
 2
 
@@ -22,7 +22,7 @@ statement ok
 DELETE FROM t WHERE id < 1000;
 
 query I
-SELECT cached_row_groups FROM condition_cache_info('t', 'val = 42');
+SELECT cached_row_groups FROM condition_cache_info('t', 'val = 42 AND id % 2 = 0');
 ----
 1
 
@@ -30,6 +30,6 @@ statement ok
 UPDATE t SET val = val + 1 WHERE id = 125000;
 
 query I
-SELECT cached_row_groups FROM condition_cache_info('t', 'val = 42');
+SELECT cached_row_groups FROM condition_cache_info('t', 'val = 42 AND id % 2 = 0');
 ----
 0
