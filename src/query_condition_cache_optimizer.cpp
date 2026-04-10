@@ -12,6 +12,7 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
@@ -42,7 +43,21 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	auto query_state =
 	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
 	query_state->cache_apply_pending.clear();
-	PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
+	try {
+		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
+	} catch (...) {
+		// If anything goes wrong during pre-optimization (e.g. generated columns,
+		// aliased column names, lambda expressions, expressions that error on
+		// evaluation), clear pending entries and let the query proceed without
+		// cache optimization.
+		// TODO: This is a workaround. The root cause is that BuildCacheForPredicate
+		// round-trips through ToString() -> Parser -> CheckBinder, but CheckBinder
+		// is designed for CHECK constraints and has different semantics than the
+		// normal query binder. The correct fix is to use the already-bound
+		// filter.expressions directly by cloning and remapping column indices,
+		// avoiding re-binding entirely.
+		query_state->cache_apply_pending.clear();
+	}
 }
 
 void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
@@ -77,6 +92,17 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 		return; // not a DuckDB table (e.g. system table, external)
 	}
 	if (filter.expressions.empty()) {
+		return;
+	}
+
+	auto &duck_table = table->Cast<DuckTableEntry>();
+	auto &storage = duck_table.GetStorage();
+
+	// Skip caching for tables with indexes. InjectCacheFilter adds a ROW_ID
+	// filter to LogicalGet.table_filters, but DuckDB only takes the ART index
+	// scan path when filter_set.filters.size() == 1. Our extra filter would
+	// force an otherwise indexable query onto a sequential scan.
+	if (storage.HasIndexes()) {
 		return;
 	}
 
@@ -126,12 +152,42 @@ CacheKey QueryConditionCacheOptimizer::ComputePredicateKey(ClientContext &contex
 	return CacheKey {table_oid, std::move(canonical)};
 }
 
+// Functions that cannot be safely cached because re-binding via CheckBinder may
+// produce a semantically different expression than the original plan binding.
+// For example, ALIAS() returns the column name as a string literal, which has
+// context-dependent resolution.
+static bool ContainsUnsafeFunction(const Expression &expr) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		auto name = StringUtil::Lower(func.function.name);
+		if (name == "alias") {
+			return true;
+		}
+	}
+	bool found = false;
+	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+		if (!found && ContainsUnsafeFunction(child)) {
+			found = true;
+		}
+	});
+	return found;
+}
+
 shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredicate(
     ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get) {
 	auto table_ptr = get.GetTable();
 	if (!table_ptr) {
 		return nullptr;
 	}
+
+	// Skip caching for predicates that contain context-dependent functions where
+	// re-binding via CheckBinder would produce semantically different results.
+	for (const auto &expr : expressions) {
+		if (ContainsUnsafeFunction(*expr)) {
+			return nullptr;
+		}
+	}
+
 	auto &table_entry = table_ptr->Cast<DuckTableEntry>();
 	string predicate_sql = ReconstructPredicateSQL(expressions);
 	auto bound_expr = BindPredicate(context, table_entry, predicate_sql);
