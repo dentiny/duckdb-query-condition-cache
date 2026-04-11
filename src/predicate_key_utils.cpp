@@ -3,8 +3,10 @@
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 
@@ -74,13 +76,68 @@ void NormalizeExpressionForCacheKey(Expression &expr) {
 	}
 }
 
+namespace {
+
+// Fill BoundReferenceExpression aliases with column names so ToString prints
+// "val" instead of "#1", matching the plan binder output.
+void SetReferenceAliases(Expression &expr, DuckTableEntry &table_entry) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		auto &ref = expr.Cast<BoundReferenceExpression>();
+		if (ref.alias.empty()) {
+			for (const auto &col : table_entry.GetColumns().Physical()) {
+				if (col.Oid() == ref.index) {
+					ref.alias = col.Name();
+					break;
+				}
+			}
+		}
+	}
+	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { SetReferenceAliases(child, table_entry); });
+}
+
+} // namespace
+
+unique_ptr<Expression> CombineWithAnd(vector<unique_ptr<Expression>> children) {
+	D_ASSERT(!children.empty());
+	if (children.size() == 1) {
+		return std::move(children[0]);
+	}
+	auto conj = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
+	conj->children = std::move(children);
+	return std::move(conj);
+}
+
 string ComputeCanonicalPredicateKey(ClientContext &context, DuckTableEntry &table_entry, const string &predicate_sql) {
 	auto bound_expr = BindPredicate(context, table_entry, predicate_sql);
 	if (!bound_expr) {
 		return "";
 	}
+	// Strip CheckBinder's outer INTEGER cast and restore column aliases so the
+	// result matches the plan binder output for the same predicate.
+	if (bound_expr->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		auto &cast = bound_expr->Cast<BoundCastExpression>();
+		if (cast.return_type.id() == LogicalTypeId::INTEGER) {
+			bound_expr = std::move(cast.child);
+		}
+	}
+	SetReferenceAliases(*bound_expr, table_entry);
 	NormalizeExpressionForCacheKey(*bound_expr);
 	return bound_expr->ToString();
+}
+
+string ComputeCanonicalPredicateKey(const vector<unique_ptr<Expression>> &expressions) {
+	if (expressions.empty()) {
+		return "";
+	}
+	// Clone so we don't mutate the plan's expressions during normalization.
+	vector<unique_ptr<Expression>> cloned;
+	cloned.reserve(expressions.size());
+	for (const auto &expr : expressions) {
+		cloned.push_back(expr->Copy());
+	}
+	auto combined = CombineWithAnd(std::move(cloned));
+	NormalizeExpressionForCacheKey(*combined);
+	return combined->ToString();
 }
 
 } // namespace duckdb

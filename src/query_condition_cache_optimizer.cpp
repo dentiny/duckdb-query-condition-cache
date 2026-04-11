@@ -6,10 +6,9 @@
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
-#include "duckdb/common/algorithm.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -46,16 +45,7 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	try {
 		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
 	} catch (...) {
-		// If anything goes wrong during pre-optimization (e.g. generated columns,
-		// aliased column names, lambda expressions, expressions that error on
-		// evaluation), clear pending entries and let the query proceed without
-		// cache optimization.
-		// TODO: This is a workaround. The root cause is that BuildCacheForPredicate
-		// round-trips through ToString() -> Parser -> CheckBinder, but CheckBinder
-		// is designed for CHECK constraints and has different semantics than the
-		// normal query binder. The correct fix is to use the already-bound
-		// filter.expressions directly by cloning and remapping column indices,
-		// avoiding re-binding entirely.
+		// Defense in depth: skip cache optimization rather than failing the query.
 		query_state->cache_apply_pending.clear();
 	}
 }
@@ -98,16 +88,13 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	auto &duck_table = table->Cast<DuckTableEntry>();
 	auto &storage = duck_table.GetStorage();
 
-	// Skip caching for tables with indexes. InjectCacheFilter adds a ROW_ID
-	// filter to LogicalGet.table_filters, but DuckDB only takes the ART index
-	// scan path when filter_set.filters.size() == 1. Our extra filter would
-	// force an otherwise indexable query onto a sequential scan.
+	// Skip caching on indexed tables: our extra ROW_ID filter would force
+	// filter_set.filters.size() > 1, disabling the ART index scan path.
 	if (storage.HasIndexes()) {
 		return;
 	}
 
-	// TODO: Use std::optional when DuckDB upgrades to C++17 in v2.0
-	auto key = ComputePredicateKey(context, table->oid, filter.expressions, get);
+	CacheKey key {table->oid, ComputeCanonicalPredicateKey(filter.expressions)};
 	if (key.filter_key.empty()) {
 		return;
 	}
@@ -129,49 +116,26 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	}
 }
 
-// Reconstruct SQL from filter expressions, sort for alphabetical ordering.
-string QueryConditionCacheOptimizer::ReconstructPredicateSQL(const vector<unique_ptr<Expression>> &expressions) {
-	vector<string> parts;
-	parts.reserve(expressions.size());
-	for (const auto &expr : expressions) {
-		parts.push_back(expr->ToString());
+namespace {
+
+// Rewrite BoundColumnRefExpression -> BoundReferenceExpression(storage OID),
+// the shape BuildCacheEntry expects. The source column_index is a position
+// into LogicalGet::column_ids, which maps to the storage OID.
+void ConvertColumnRefsToScanRefs(unique_ptr<Expression> &expr, const LogicalGet &get) {
+	if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		auto &colref = expr->Cast<BoundColumnRefExpression>();
+		auto &column_ids = get.GetColumnIds();
+		auto col_idx = colref.binding.column_index;
+		ALWAYS_ASSERT(col_idx < column_ids.size());
+		auto storage_oid = column_ids[col_idx].GetPrimaryIndex();
+		expr = make_uniq<BoundReferenceExpression>(colref.alias, colref.return_type, storage_oid);
+		return;
 	}
-	sort(parts.begin(), parts.end());
-	return StringUtil::Join(parts, " AND ");
+	ExpressionIterator::EnumerateChildren(
+	    *expr, [&](unique_ptr<Expression> &child) { ConvertColumnRefsToScanRefs(child, get); });
 }
 
-CacheKey QueryConditionCacheOptimizer::ComputePredicateKey(ClientContext &context, idx_t table_oid,
-                                                           const vector<unique_ptr<Expression>> &expressions,
-                                                           LogicalGet &get) {
-	auto table_ptr = get.GetTable();
-	if (!table_ptr) {
-		return CacheKey {table_oid, ""};
-	}
-	string predicate_sql = ReconstructPredicateSQL(expressions);
-	string canonical = ComputeCanonicalPredicateKey(context, table_ptr->Cast<DuckTableEntry>(), predicate_sql);
-	return CacheKey {table_oid, std::move(canonical)};
-}
-
-// Functions that cannot be safely cached because re-binding via CheckBinder may
-// produce a semantically different expression than the original plan binding.
-// For example, ALIAS() returns the column name as a string literal, which has
-// context-dependent resolution.
-static bool ContainsUnsafeFunction(const Expression &expr) {
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-		auto &func = expr.Cast<BoundFunctionExpression>();
-		auto name = StringUtil::Lower(func.function.name);
-		if (name == "alias") {
-			return true;
-		}
-	}
-	bool found = false;
-	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
-		if (!found && ContainsUnsafeFunction(child)) {
-			found = true;
-		}
-	});
-	return found;
-}
+} // namespace
 
 shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredicate(
     ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get) {
@@ -179,27 +143,22 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 	if (!table_ptr) {
 		return nullptr;
 	}
-
-	// Skip caching for predicates that contain context-dependent functions where
-	// re-binding via CheckBinder would produce semantically different results.
-	for (const auto &expr : expressions) {
-		if (ContainsUnsafeFunction(*expr)) {
-			return nullptr;
-		}
-	}
-
 	auto &table_entry = table_ptr->Cast<DuckTableEntry>();
-	string predicate_sql = ReconstructPredicateSQL(expressions);
-	auto bound_expr = BindPredicate(context, table_entry, predicate_sql);
-	if (!bound_expr) {
-		return nullptr;
+
+	// Clone the plan's already-bound filter expressions and remap column refs
+	// to storage OIDs.
+	vector<unique_ptr<Expression>> cloned;
+	cloned.reserve(expressions.size());
+	for (const auto &expr : expressions) {
+		auto copy = expr->Copy();
+		ConvertColumnRefsToScanRefs(copy, get);
+		cloned.push_back(std::move(copy));
 	}
 
-	// CheckBinder sets target_type = INTEGER, re-cast to BOOLEAN
-	bound_expr =
-	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
+	auto predicate = CombineWithAnd(std::move(cloned));
+	predicate = BoundCastExpression::AddCastToType(context, std::move(predicate), LogicalType {LogicalTypeId::BOOLEAN});
 
-	return BuildCacheEntry(context, table_entry, *bound_expr);
+	return BuildCacheEntry(context, table_entry, *predicate);
 }
 
 void QueryConditionCacheOptimizer::PostOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,

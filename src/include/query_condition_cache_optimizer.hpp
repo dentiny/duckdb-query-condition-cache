@@ -42,11 +42,6 @@ private:
 	static void PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan, bool inside_dml,
 	                            CacheOptimizerQueryState &state);
 
-	// Compute a canonical predicate key via parse+bind normalization,
-	// matching the key format used by condition_cache_build/info.
-	static CacheKey ComputePredicateKey(ClientContext &context, idx_t table_oid,
-	                                    const vector<unique_ptr<Expression>> &expressions, LogicalGet &get);
-
 	// Build cache entry for a predicate on a table
 	static shared_ptr<ConditionCacheEntry>
 	BuildCacheForPredicate(ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get);
@@ -58,9 +53,6 @@ private:
 	// Inject a rowid-backed cache filter into a LogicalGet while preserving its visible output.
 	static void InjectCacheFilter(ClientContext &context, LogicalGet &get,
 	                              const shared_ptr<ConditionCacheEntry> &entry);
-
-	// Reconstruct SQL from filter expressions, sort for alphabetical ordering
-	static string ReconstructPredicateSQL(const vector<unique_ptr<Expression>> &expressions);
 };
 
 } // namespace duckdb
