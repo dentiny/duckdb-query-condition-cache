@@ -1,102 +1,78 @@
-# QueryConditionCache
+# DuckDB Query Condition Cache
 
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
+`query_condition_cache` is a DuckDB extension for repeated-query workloads like **metrics monitoring dashboards**, **log investigation**, and other **recurring read paths** where the same filter shows up again and again.
 
----
+Instead of re-evaluating a predicate across the whole table every time, it remembers which row-group vectors matched before and lets DuckDB skip vectors that are already known to be empty for that predicate.
 
-This extension, QueryConditionCache, allow you to ... <extension_goal>.
+It is especially useful for repeated `LIKE` searches and other expression-heavy filters that are expensive to revisit.
 
+## Performance
 
-## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
+On the HDFS_v2 log analytics benchmark (~71M log lines), `query_condition_cache` reached up to **314.3x faster** repeated-query performance. The biggest gains showed up on selective HDFS log investigation queries, where the same predicate can be reused across runs.
+
+![HDFS log analytics benchmark](docs/img/hdfs_log_bench.png)
+
+Results depend on predicate selectivity, cache reuse, and the surrounding storage/cache state. Benchmark scripts and methodology live in `[benchmark/README.md](benchmark/README.md)` and `[benchmark/run_hdfs_log_benchmark.py](benchmark/run_hdfs_log_benchmark.py)`.
+
+## Usage
+
+```sql
+LOAD 'query_condition_cache';
+
+CREATE TABLE t AS
+SELECT i AS id, i % 100 AS val, 'msg_' || (i % 10) AS msg
+FROM range(500000) t(i);
 ```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
 
-### Build steps
-Now to build the extension, run:
+You can either build the cache yourself for a known predicate, or let the optimizer do it on demand.
+
+### Manual Cache Build
+
+If you already know the filter you care about, build a cache entry directly for that table/predicate pair:
+
+```sql
+SELECT * FROM condition_cache_build('t', 'val = 42 AND msg LIKE ''%2''');
+SELECT * FROM condition_cache_info('t', 'val = 42 AND msg LIKE ''%2''');
+```
+
+`condition_cache_info` returns:
+
+- `cached_row_groups`
+- `total_row_groups`
+- `qualifying_vectors`
+- `total_vectors`
+
+### Automatic Cache Build And Apply
+
+If you prefer not to manage cache entries manually, the optimizer path is enabled by default:
+
+```sql
+SET use_query_condition_cache = true;
+
+SELECT count(*) FROM t WHERE val = 42;
+SELECT * FROM condition_cache_info('t', 'val = 42');
+```
+
+On a cache miss, the optimizer builds the cache inline for supported filtered table scans. On later queries, it injects a `ROW_ID`-backed filter so cached-empty vectors can be skipped. Setting `use_query_condition_cache = false` disables the optimizer path and clears cached entries.
+
+## How It Works
+
+Under the hood, the extension does five things:
+
+- Canonicalizes the predicate into a stable cache key
+- Scans only referenced columns plus `ROW_ID`
+- Records which vectors inside each row group contain qualifying rows
+- Stores entries in DuckDB's per-database `ObjectCache`
+- Treats uncached row groups as pass-through for correctness
+
+## Roadmap
+
+- [ ] Parquet predicate scan cache support
+
+## Development
+
 ```sh
-make
-```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/query_condition_cache/query_condition_cache.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `query_condition_cache.duckdb_extension` is the loadable binary as it would be distributed.
-
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
-
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `query_condition_cache()` that takes a string arguments and returns a string:
-```
-D select query_condition_cache('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ QueryConditionCache Jane 🐥 │
-└───────────────┘
-```
-
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
-```sh
+GEN=ninja make
 make test
+./build/release/test/unittest --test-dir . "test/sql/condition_cache_auto.test"
 ```
-
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
-
-CLI:
-```shell
-duckdb -unsigned
-```
-
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
-
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
-
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
-
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL query_condition_cache;
-LOAD query_condition_cache;
-```
-
-## Setting up CLion
-
-### Opening project
-Configuring CLion with this extension requires a little work. Firstly, make sure that the DuckDB submodule is available.
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
-
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`, and CMake Options to which the following flag should be added, with the path to the extension CMakeList:
-
-```
--DDUCKDB_EXTENSION_CONFIGS=<path_to_the_exentension_CMakeLists.txt>
-```
-
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
