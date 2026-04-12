@@ -6,12 +6,12 @@
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
-#include "duckdb/common/algorithm.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
@@ -42,7 +42,12 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	auto query_state =
 	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
 	query_state->cache_apply_pending.clear();
-	PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
+	try {
+		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
+	} catch (...) {
+		// Defense in depth: skip cache optimization rather than failing the query.
+		query_state->cache_apply_pending.clear();
+	}
 }
 
 void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
@@ -80,8 +85,16 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 		return;
 	}
 
-	// TODO: Use std::optional when DuckDB upgrades to C++17 in v2.0
-	auto key = ComputePredicateKey(context, table->oid, filter.expressions, get);
+	auto &duck_table = table->Cast<DuckTableEntry>();
+	auto &storage = duck_table.GetStorage();
+
+	// Skip caching on indexed tables: our extra ROW_ID filter would force
+	// filter_set.filters.size() > 1, disabling the ART index scan path.
+	if (storage.HasIndexes()) {
+		return;
+	}
+
+	CacheKey key {table->oid, ComputeCanonicalPredicateKey(filter.expressions)};
 	if (key.filter_key.empty()) {
 		return;
 	}
@@ -103,28 +116,26 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	}
 }
 
-// Reconstruct SQL from filter expressions, sort for alphabetical ordering.
-string QueryConditionCacheOptimizer::ReconstructPredicateSQL(const vector<unique_ptr<Expression>> &expressions) {
-	vector<string> parts;
-	parts.reserve(expressions.size());
-	for (const auto &expr : expressions) {
-		parts.push_back(expr->ToString());
+namespace {
+
+// Rewrite BoundColumnRefExpression -> BoundReferenceExpression(storage OID),
+// the shape BuildCacheEntry expects. The source column_index is a position
+// into LogicalGet::column_ids, which maps to the storage OID.
+void ConvertColumnRefsToScanRefs(unique_ptr<Expression> &expr, const LogicalGet &get) {
+	if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		auto &colref = expr->Cast<BoundColumnRefExpression>();
+		auto &column_ids = get.GetColumnIds();
+		auto col_idx = colref.binding.column_index;
+		ALWAYS_ASSERT(col_idx < column_ids.size());
+		auto storage_oid = column_ids[col_idx].GetPrimaryIndex();
+		expr = make_uniq<BoundReferenceExpression>(colref.alias, colref.return_type, storage_oid);
+		return;
 	}
-	sort(parts.begin(), parts.end());
-	return StringUtil::Join(parts, " AND ");
+	ExpressionIterator::EnumerateChildren(
+	    *expr, [&](unique_ptr<Expression> &child) { ConvertColumnRefsToScanRefs(child, get); });
 }
 
-CacheKey QueryConditionCacheOptimizer::ComputePredicateKey(ClientContext &context, idx_t table_oid,
-                                                           const vector<unique_ptr<Expression>> &expressions,
-                                                           LogicalGet &get) {
-	auto table_ptr = get.GetTable();
-	if (!table_ptr) {
-		return CacheKey {table_oid, ""};
-	}
-	string predicate_sql = ReconstructPredicateSQL(expressions);
-	string canonical = ComputeCanonicalPredicateKey(context, table_ptr->Cast<DuckTableEntry>(), predicate_sql);
-	return CacheKey {table_oid, std::move(canonical)};
-}
+} // namespace
 
 shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredicate(
     ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get) {
@@ -133,17 +144,21 @@ shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredi
 		return nullptr;
 	}
 	auto &table_entry = table_ptr->Cast<DuckTableEntry>();
-	string predicate_sql = ReconstructPredicateSQL(expressions);
-	auto bound_expr = BindPredicate(context, table_entry, predicate_sql);
-	if (!bound_expr) {
-		return nullptr;
+
+	// Clone the plan's already-bound filter expressions and remap column refs
+	// to storage OIDs.
+	vector<unique_ptr<Expression>> cloned;
+	cloned.reserve(expressions.size());
+	for (const auto &expr : expressions) {
+		auto copy = expr->Copy();
+		ConvertColumnRefsToScanRefs(copy, get);
+		cloned.push_back(std::move(copy));
 	}
 
-	// CheckBinder sets target_type = INTEGER, re-cast to BOOLEAN
-	bound_expr =
-	    BoundCastExpression::AddCastToType(context, std::move(bound_expr), LogicalType {LogicalTypeId::BOOLEAN});
+	auto predicate = CombineWithAnd(std::move(cloned));
+	predicate = BoundCastExpression::AddCastToType(context, std::move(predicate), LogicalType {LogicalTypeId::BOOLEAN});
 
-	return BuildCacheEntry(context, table_entry, *bound_expr);
+	return BuildCacheEntry(context, table_entry, *predicate);
 }
 
 void QueryConditionCacheOptimizer::PostOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
