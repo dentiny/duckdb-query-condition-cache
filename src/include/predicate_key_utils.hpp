@@ -18,8 +18,7 @@ string ComputeCanonicalPredicateKey(ClientContext &context, DuckTableEntry &tabl
 // the optimizer path (filter.expressions) to avoid re-binding via CheckBinder.
 string ComputeCanonicalPredicateKey(const vector<unique_ptr<Expression>> &expressions);
 
-// Combine expressions under AND, taking ownership. Single input is returned
-// unchanged.
+// Combine expressions under AND. Single input is returned unchanged.
 unique_ptr<Expression> CombineWithAnd(vector<unique_ptr<Expression>> children);
 
 // Normalize a bound expression tree in-place so equivalent predicates produce
