@@ -1,0 +1,314 @@
+# name: test/sql/condition_cache_correctness.test
+# description: Verify query results remain correct after DML with condition cache enabled
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+SET use_query_condition_cache = true;
+
+# UPDATE non-matching -> matching (single row)
+# Cache has bit=0 for the vector containing the updated row.
+# Without invalidation, the vector is skipped and the updated row is lost.
+
+statement ok
+CREATE TABLE t_upd1 AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_upd1 WHERE flag = 1;
+----
+11
+
+statement ok
+UPDATE t_upd1 SET flag = 1 WHERE id = 100000;
+
+query I
+SELECT count(*) FROM t_upd1 WHERE flag = 1;
+----
+12
+
+# Bulk UPDATE across many vectors
+# Updates rows spread across multiple vectors from non-matching to matching.
+
+statement ok
+CREATE TABLE t_upd2 AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_upd2 WHERE flag = 1;
+----
+11
+
+statement ok
+UPDATE t_upd2 SET flag = 1 WHERE id % 2048 = 1000 AND id > 2048;
+
+query I
+SELECT count(*) FROM t_upd2 WHERE flag = 1;
+----
+108
+
+# UPDATE matching -> non-matching (should still be correct)
+# The vector was already bit=1, so scanning it is fine; the updated row
+# just won't match the predicate anymore.
+
+statement ok
+CREATE TABLE t_upd3 AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_upd3 WHERE flag = 1;
+----
+11
+
+statement ok
+UPDATE t_upd3 SET flag = 0 WHERE id = 5;
+
+query I
+SELECT count(*) FROM t_upd3 WHERE flag = 1;
+----
+10
+
+# DELETE should not lose rows that still exist
+
+statement ok
+CREATE TABLE t_del AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_del WHERE flag = 1;
+----
+11
+
+statement ok
+DELETE FROM t_del WHERE id = 5;
+
+query I
+SELECT count(*) FROM t_del WHERE flag = 1;
+----
+10
+
+# INSERT should not hide new matching rows
+
+statement ok
+CREATE TABLE t_ins AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_ins WHERE flag = 1;
+----
+11
+
+statement ok
+INSERT INTO t_ins VALUES (999999, 1);
+
+query I
+SELECT count(*) FROM t_ins WHERE flag = 1;
+----
+12
+
+# Multiple DML operations interleaved with queries
+# Each query must return the correct count reflecting all prior DML.
+
+statement ok
+CREATE TABLE t_multi AS
+  SELECT i AS id,
+         CASE WHEN i % 50000 = 0 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_multi WHERE flag = 1;
+----
+4
+
+statement ok
+UPDATE t_multi SET flag = 1 WHERE id = 75000;
+
+query I
+SELECT count(*) FROM t_multi WHERE flag = 1;
+----
+5
+
+statement ok
+DELETE FROM t_multi WHERE id = 0;
+
+query I
+SELECT count(*) FROM t_multi WHERE flag = 1;
+----
+4
+
+statement ok
+INSERT INTO t_multi VALUES (999999, 1);
+
+query I
+SELECT count(*) FROM t_multi WHERE flag = 1;
+----
+5
+
+statement ok
+UPDATE t_multi SET flag = 0 WHERE id = 75000;
+
+query I
+SELECT count(*) FROM t_multi WHERE flag = 1;
+----
+4
+
+# SUM/actual values (not just count) to catch data correctness
+
+statement ok
+CREATE TABLE t_sum AS
+  SELECT i AS id, i AS val FROM range(200000) t(i);
+
+query I
+SELECT sum(val) FROM t_sum WHERE val < 2048;
+----
+2096128
+
+statement ok
+UPDATE t_sum SET val = 0 WHERE id BETWEEN 100 AND 199;
+
+query I
+SELECT sum(val) FROM t_sum WHERE val < 2048;
+----
+2081178
+
+# MERGE INTO -- matched rows updated, unmatched rows inserted
+# Both paths must be reflected in subsequent queries.
+
+statement ok
+CREATE TABLE t_merge_dst AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+# Prime the cache
+query I
+SELECT count(*) FROM t_merge_dst WHERE flag = 1;
+----
+11
+
+statement ok
+CREATE TABLE t_merge_src (id INTEGER, flag INTEGER);
+
+statement ok
+INSERT INTO t_merge_src VALUES (5, 0), (100000, 1), (300000, 1);
+
+statement ok
+MERGE INTO t_merge_dst AS dst
+USING t_merge_src AS src ON dst.id = src.id
+WHEN MATCHED THEN UPDATE SET flag = src.flag
+WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.flag);
+
+# id=5 was flag=1, now updated to flag=0 -> -1
+# id=100000 was flag=0, now updated to flag=1 -> +1
+# id=300000 inserted with flag=1 -> +1
+# 11 - 1 + 1 + 1 = 12
+query I
+SELECT count(*) FROM t_merge_dst WHERE flag = 1;
+----
+12
+
+# TRUNCATE then query -- stale cache must not cause wrong results
+
+statement ok
+CREATE TABLE t_trunc AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+# Prime the cache
+query I
+SELECT count(*) FROM t_trunc WHERE flag = 1;
+----
+11
+
+statement ok
+TRUNCATE t_trunc;
+
+query I
+SELECT count(*) FROM t_trunc WHERE flag = 1;
+----
+0
+
+# Re-insert different data -- matching row at a different location
+statement ok
+INSERT INTO t_trunc SELECT i AS id, CASE WHEN i = 50000 THEN 1 ELSE 0 END AS flag FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_trunc WHERE flag = 1;
+----
+1
+
+# INSERT into partial tail row group -- correctness
+# Cache is built when the last row group is partially filled.
+# New rows inserted into that partial row group must still be found.
+
+statement ok
+CREATE TABLE t_partial AS
+  SELECT i AS id,
+         CASE WHEN i < 10 THEN 1 ELSE 0 END AS flag
+  FROM range(130000) t(i);
+
+# 130000 rows = 1 full RG (122880) + partial RG with 7120 rows
+# Prime the cache -- flag=1 only in the first vector of RG0
+query I
+SELECT count(*) FROM t_partial WHERE flag = 1;
+----
+10
+
+# Insert a matching row into the partial tail row group
+statement ok
+INSERT INTO t_partial VALUES (999999, 1);
+
+query I
+SELECT count(*) FROM t_partial WHERE flag = 1;
+----
+11
+
+# Insert enough to create a new row group entirely
+statement ok
+INSERT INTO t_partial SELECT i + 1000000 AS id, CASE WHEN i = 0 THEN 1 ELSE 0 END AS flag FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM t_partial WHERE flag = 1;
+----
+12
+
+# DROP TABLE and recreate -- stale cache must not interfere
+
+statement ok
+CREATE TABLE t_drop AS
+  SELECT i AS id,
+         CASE WHEN i <= 10 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+# Prime the cache
+query I
+SELECT count(*) FROM t_drop WHERE flag = 1;
+----
+11
+
+statement ok
+DROP TABLE t_drop;
+
+statement ok
+CREATE TABLE t_drop AS
+  SELECT i AS id,
+         CASE WHEN i = 50000 THEN 1 ELSE 0 END AS flag
+  FROM range(200000) t(i);
+
+# New table, different data -- must return correct result
+query I
+SELECT count(*) FROM t_drop WHERE flag = 1;
+----
+1
