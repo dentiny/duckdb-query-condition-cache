@@ -1,6 +1,6 @@
 # DuckDB Query Condition Cache
 
-`query_condition_cache` is a DuckDB extension for repeated-query workloads like **metrics monitoring dashboards**, **log investigation**, and other **recurring read paths** where the same filter shows up again and again.
+`query_condition_cache` adds a predicate cache to DuckDB. It caches which row groups match a filter, so repeated queries can skip work and run much faster. It fits workloads like **metrics monitoring dashboards**, **log investigation**, and other **recurring read paths** where the same filters come up again and again.
 
 Instead of re-evaluating a predicate across the whole table every time, it remembers which row-group vectors matched before and lets DuckDB skip vectors that are already known to be empty for that predicate.
 
