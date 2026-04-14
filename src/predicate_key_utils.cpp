@@ -1,6 +1,7 @@
 #include "predicate_key_utils.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -9,8 +10,6 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
-
-#include "duckdb/common/algorithm.hpp"
 
 namespace duckdb {
 
