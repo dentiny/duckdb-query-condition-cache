@@ -19,12 +19,38 @@ FORCE INSTALL query_condition_cache;
 LOAD 'query_condition_cache';
 
 CREATE TABLE t AS
--- Predicate cache is automatically populated.
 SELECT i AS id, i % 100 AS val, 'msg_' || (i % 10) AS msg
 FROM range(500000) t(i);
 ```
 
 You can either build the cache yourself for a known predicate, or let the optimizer do it on demand.
+
+### Automatic Cache Build And Apply
+
+If you prefer not to manage cache entries manually, the optimizer path is enabled by default:
+
+```sql
+SET use_query_condition_cache = true;
+
+-- Predicate cache is automatically populated.
+SELECT count(*) FROM t WHERE val = 42;
+┌──────────────┐
+│ count_star() │
+│    int64     │
+├──────────────┤
+│         5000 │
+└──────────────┘
+
+SELECT * FROM condition_cache_info('t', 'val = 42');
+┌───────────────────┬──────────────────┬────────────────────┬───────────────┐
+│ cached_row_groups │ total_row_groups │ qualifying_vectors │ total_vectors │
+│       int32       │      int32       │       int32        │     int32     │
+├───────────────────┼──────────────────┼────────────────────┼───────────────┤
+│                 5 │                5 │                245 │           245 │
+└───────────────────┴──────────────────┴────────────────────┴───────────────┘
+```
+
+On a cache miss, the optimizer builds the cache inline for supported filtered table scans. On later queries, it injects a `ROW_ID`-backed filter so cached-empty vectors can be skipped. Setting `use_query_condition_cache = false` disables the optimizer path and clears cached entries.
 
 ### Manual Cache Build
 
@@ -50,32 +76,6 @@ SELECT * FROM condition_cache_info('t', 'val = 42 AND msg LIKE ''%2''');
 │                 5 │                5 │                245 │           245 │
 └───────────────────┴──────────────────┴────────────────────┴───────────────┘
 ```
-
-### Automatic Cache Build And Apply
-
-If you prefer not to manage cache entries manually, the optimizer path is enabled by default:
-
-```sql
-SET use_query_condition_cache = true;
-
-SELECT count(*) FROM t WHERE val = 42;
-┌──────────────┐
-│ count_star() │
-│    int64     │
-├──────────────┤
-│         5000 │
-└──────────────┘
-
-SELECT * FROM condition_cache_info('t', 'val = 42');
-┌───────────────────┬──────────────────┬────────────────────┬───────────────┐
-│ cached_row_groups │ total_row_groups │ qualifying_vectors │ total_vectors │
-│       int32       │      int32       │       int32        │     int32     │
-├───────────────────┼──────────────────┼────────────────────┼───────────────┤
-│                 5 │                5 │                245 │           245 │
-└───────────────────┴──────────────────┴────────────────────┴───────────────┘
-```
-
-On a cache miss, the optimizer builds the cache inline for supported filtered table scans. On later queries, it injects a `ROW_ID`-backed filter so cached-empty vectors can be skipped. Setting `use_query_condition_cache = false` disables the optimizer path and clears cached entries.
 
 ## How It Works
 
