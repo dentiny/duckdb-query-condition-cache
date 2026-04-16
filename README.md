@@ -15,7 +15,7 @@ Results depend on predicate selectivity, cache reuse, and the surrounding storag
 ## Usage
 
 ```sql
-FORCE INSTALL query_condition_cache;
+FORCE INSTALL query_condition_cache FROM community;
 LOAD 'query_condition_cache';
 
 CREATE TABLE t AS
