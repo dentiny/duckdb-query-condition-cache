@@ -11,3 +11,5 @@ test/python/__pycache__/
 AGENTS.md
 CLAUDE.md
 .cache/
+.venv/
+.vscode/

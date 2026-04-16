@@ -12,6 +12,8 @@
 
 namespace duckdb {
 
+class DuckTableEntry;
+
 // Derived from DuckDB's compile-time configurable constants
 inline constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
 inline constexpr idx_t BITVECTOR_ARRAY_SIZE = (VECTORS_PER_ROW_GROUP + 63) / 64;
@@ -61,6 +63,8 @@ struct CacheEntryStats {
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
+	idx_t layout_epoch = 0;
+
 	static string ObjectType() {
 		return "query_condition_cache_entry";
 	}
@@ -152,9 +156,18 @@ public:
 
 	// Lookup by cache key; returns nullptr if not found
 	shared_ptr<ConditionCacheEntry> Lookup(ClientContext &context, const CacheKey &key);
+	// Lookup after syncing the table layout epoch.
+	shared_ptr<ConditionCacheEntry> Lookup(ClientContext &context, DuckTableEntry &table_entry, const CacheKey &key);
 
 	// Upsert an entry
 	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
+	// Upsert after syncing the table layout epoch and stamping the entry.
+	void Upsert(ClientContext &context, DuckTableEntry &table_entry, const CacheKey &key,
+	            shared_ptr<ConditionCacheEntry> entry);
+
+	// Get the current layout epoch for a table, incrementing it if the table's
+	// row-group layout changed in a non-append-compatible way.
+	idx_t GetLayoutEpoch(ClientContext &context, DuckTableEntry &table_entry);
 
 	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
 	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
@@ -170,9 +183,15 @@ public:
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
 private:
+	struct TableLayoutState {
+		idx_t layout_epoch = 0;
+		vector<idx_t> row_group_counts;
+	};
+
 	concurrency::mutex lock;
 	// Tracks all table OIDs that have been cached, for ClearAll
 	unordered_set<idx_t> cached_table_oids DUCKDB_GUARDED_BY(lock);
+	unordered_map<idx_t, TableLayoutState> table_layouts DUCKDB_GUARDED_BY(lock);
 
 	static string MakeCacheKeyString(const CacheKey &key);
 	static string MakeFilterKeyIndexKey(idx_t table_oid);

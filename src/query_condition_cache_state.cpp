@@ -1,10 +1,44 @@
 #include "query_condition_cache_state.hpp"
 
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/function/partition_stats.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
+
+namespace {
+
+vector<idx_t> GetRowGroupCounts(ClientContext &context, DuckTableEntry &table_entry) {
+	auto partitions = table_entry.GetStorage().GetPartitionStats(context);
+	vector<idx_t> counts;
+	counts.reserve(partitions.size());
+	for (const auto &partition : partitions) {
+		counts.push_back(partition.count);
+	}
+	return counts;
+}
+
+bool LayoutIsAppendCompatible(const vector<idx_t> &old_counts, const vector<idx_t> &new_counts) {
+	if (old_counts.empty()) {
+		return true;
+	}
+	if (new_counts.size() < old_counts.size()) {
+		return false;
+	}
+	if (old_counts.size() == 1) {
+		return new_counts[0] >= old_counts[0];
+	}
+	for (idx_t i = 0; i + 1 < old_counts.size(); ++i) {
+		if (new_counts[i] != old_counts[i]) {
+			return false;
+		}
+	}
+	return new_counts[old_counts.size() - 1] >= old_counts[old_counts.size() - 1];
+}
+
+} // namespace
 
 // ------- ROW_GROUP_FILTER -------
 
@@ -202,6 +236,29 @@ shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(ClientContext &conte
 	return cache.Get<ConditionCacheEntry>(MakeCacheKeyString(key));
 }
 
+shared_ptr<ConditionCacheEntry> ConditionCacheStore::Lookup(ClientContext &context, DuckTableEntry &table_entry,
+                                                            const CacheKey &key) {
+	auto current_layout_epoch = GetLayoutEpoch(context, table_entry);
+	auto entry = Lookup(context, key);
+	if (!entry || entry->layout_epoch == current_layout_epoch) {
+		return entry;
+	}
+
+	auto &cache = ObjectCache::GetObjectCache(context);
+	cache.Delete(MakeCacheKeyString(key));
+
+	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(key.table_oid));
+	if (index) {
+		index->Remove(key.filter_key);
+		if (index->IsEmpty()) {
+			cache.Delete(MakeFilterKeyIndexKey(key.table_oid));
+			concurrency::lock_guard<concurrency::mutex> guard(lock);
+			cached_table_oids.erase(key.table_oid);
+		}
+	}
+	return nullptr;
+}
+
 void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry) {
 	if (!entry) {
 		throw InvalidInputException("ConditionCacheStore::Upsert: entry must not be null");
@@ -214,6 +271,24 @@ void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, sh
 
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	cached_table_oids.insert(key.table_oid);
+}
+
+void ConditionCacheStore::Upsert(ClientContext &context, DuckTableEntry &table_entry, const CacheKey &key,
+                                 shared_ptr<ConditionCacheEntry> entry) {
+	entry->layout_epoch = GetLayoutEpoch(context, table_entry);
+	Upsert(context, key, std::move(entry));
+}
+
+idx_t ConditionCacheStore::GetLayoutEpoch(ClientContext &context, DuckTableEntry &table_entry) {
+	auto current_row_group_counts = GetRowGroupCounts(context, table_entry);
+
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto &layout_state = table_layouts[table_entry.oid];
+	if (!LayoutIsAppendCompatible(layout_state.row_group_counts, current_row_group_counts)) {
+		layout_state.layout_epoch++;
+	}
+	layout_state.row_group_counts = std::move(current_row_group_counts);
+	return layout_state.layout_epoch;
 }
 
 idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
@@ -275,6 +350,7 @@ void ConditionCacheStore::ClearAll(ClientContext &context) {
 		cache.Delete(MakeFilterKeyIndexKey(table_oid));
 	}
 	cached_table_oids.clear();
+	table_layouts.clear();
 }
 
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {

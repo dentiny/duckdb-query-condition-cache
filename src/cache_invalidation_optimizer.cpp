@@ -2,6 +2,7 @@
 
 #include "logical_cache_invalidator.hpp"
 #include "query_condition_cache_functions.hpp"
+#include "query_condition_cache_txn_state.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -58,6 +59,9 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 		auto table_oid = ins.table.oid;
 
 		auto &duck_table = ins.table.Cast<DuckTableEntry>();
+		auto txn_state = context.registered_state->GetOrCreate<ConditionCacheTxnState>(ConditionCacheTxnState::NAME);
+		txn_state->RegisterAppendTable(table_oid, duck_table.ParentCatalog().GetName(), duck_table.ParentSchema().name,
+		                               duck_table.name);
 		auto pre_insert_rows = duck_table.GetStorage().GetTotalRows();
 
 		auto invalidator = make_uniq<LogicalCacheInvalidator>(table_oid, pre_insert_rows);
@@ -70,6 +74,9 @@ void CacheInvalidationOptimizer::WalkPlanForDML(ClientContext &context, unique_p
 		auto &merge = op->Cast<LogicalMergeInto>();
 		auto table_oid = merge.table.oid;
 		auto &duck_table = merge.table.Cast<DuckTableEntry>();
+		auto txn_state = context.registered_state->GetOrCreate<ConditionCacheTxnState>(ConditionCacheTxnState::NAME);
+		txn_state->RegisterAppendTable(table_oid, duck_table.ParentCatalog().GetName(), duck_table.ParentSchema().name,
+		                               duck_table.name);
 		auto pre_insert_rows = duck_table.GetStorage().GetTotalRows();
 
 		auto row_id_col = merge.row_id_start;

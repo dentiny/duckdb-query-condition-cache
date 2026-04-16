@@ -6,6 +6,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
+#include "test_helpers.hpp"
 
 namespace duckdb {
 
@@ -328,6 +329,82 @@ TEST_CASE("Optimizer invalidation - INSERT into partial tail row group", "[inval
 	auto chunk = count_result->Fetch();
 	// 130000 / 100 = 1300 rows with val=42, plus 1 inserted
 	REQUIRE(chunk->GetValue(0, 0).GetValue<int64_t>() == 1301);
+}
+
+TEST_CASE("Optimizer invalidation - INSERT invalidates from the committed append range", "[invalidation][optimizer]") {
+	DuckDB db(nullptr);
+	db.LoadStaticExtension<QueryConditionCacheExtension>();
+	Connection writer(db);
+	Connection grower(db);
+	Connection reader(db);
+
+	writer.Query("CREATE TABLE t (id BIGINT, flag INTEGER)");
+	writer.Query("INSERT INTO t SELECT i, 0 FROM range(130000) t(i)");
+
+	writer.BeginTransaction();
+	auto writer_insert = writer.Query("INSERT INTO t VALUES (999999, 1)");
+	REQUIRE_FALSE(writer_insert->HasError());
+
+	auto grow_result = grower.Query("INSERT INTO t SELECT 130000 + i, 0 FROM range(120000) t(i)");
+	REQUIRE_FALSE(grow_result->HasError());
+
+	BuildCache(reader, "t", "flag = 1");
+	auto before_commit = LookupEntry(reader, "t", "flag = 1");
+	REQUIRE(before_commit != nullptr);
+	REQUIRE(before_commit->HasRowGroup(2));
+	REQUIRE(before_commit->RowGroupIsCompletelyEmpty(2));
+
+	writer.Commit();
+
+	auto count_result = reader.Query("SELECT count(*) FROM t WHERE flag = 1");
+	REQUIRE_FALSE(count_result->HasError());
+	auto count_chunk = count_result->Fetch();
+	REQUIRE(count_chunk->GetValue(0, 0).GetValue<int64_t>() == 1);
+
+	auto after_commit = LookupEntry(reader, "t", "flag = 1");
+	REQUIRE(after_commit != nullptr);
+	REQUIRE(after_commit->HasRowGroup(2) == false);
+}
+
+TEST_CASE("Optimizer invalidation - checkpoint row-id rewrite invalidates stale cache layout",
+          "[invalidation][optimizer][layout_epoch]") {
+	auto db_path = TestCreatePath("qcc_layout_epoch_checkpoint.db");
+	{
+		DuckDB db(db_path);
+		db.LoadStaticExtension<QueryConditionCacheExtension>();
+		Connection con(db);
+
+		con.Query("PRAGMA disable_checkpoint_on_shutdown");
+		con.Query("SET checkpoint_threshold = '10.0 GB'");
+		con.Query("CREATE TABLE t AS SELECT i AS id, 0 AS flag FROM range(300000) t(i)");
+
+		BuildCache(con, "t", "id >= 250000");
+		auto before = LookupEntry(con, "t", "id >= 250000");
+		REQUIRE(before != nullptr);
+		REQUIRE(before->HasRowGroup(1));
+		REQUIRE(before->RowGroupIsCompletelyEmpty(1));
+		REQUIRE(before->HasRowGroup(2));
+
+		auto delete_result = con.Query("DELETE FROM t WHERE id < 122880");
+		REQUIRE_FALSE(delete_result->HasError());
+
+		auto after_delete = LookupEntry(con, "t", "id >= 250000");
+		REQUIRE(after_delete != nullptr);
+		REQUIRE(after_delete->HasRowGroup(0) == false);
+		REQUIRE(after_delete->HasRowGroup(1));
+		REQUIRE(after_delete->RowGroupIsCompletelyEmpty(1));
+
+		auto checkpoint_result = con.Query("CHECKPOINT");
+		REQUIRE_FALSE(checkpoint_result->HasError());
+
+		auto stale_after_checkpoint = LookupEntry(con, "t", "id >= 250000");
+		REQUIRE(stale_after_checkpoint == nullptr);
+
+		auto count_result = con.Query("SELECT count(*) FROM t WHERE id >= 250000");
+		REQUIRE_FALSE(count_result->HasError());
+		auto count_chunk = count_result->Fetch();
+		REQUIRE(count_chunk->GetValue(0, 0).GetValue<int64_t>() == 50000);
+	}
 }
 
 // --- Plan injection tests (verify optimizer injects PhysicalCacheInvalidator with correct fields) ---

@@ -2,6 +2,7 @@
 
 #include "concurrency/annotated_lock.hpp"
 #include "query_condition_cache_state.hpp"
+#include "query_condition_cache_txn_state.hpp"
 
 #include "duckdb/common/numeric_utils.hpp"
 
@@ -84,6 +85,9 @@ OperatorFinalResultType PhysicalCacheInvalidator::OperatorFinalize(Pipeline &pip
 	auto &invalidator_state = input.global_state.Cast<CacheInvalidatorGlobalState>();
 
 	concurrency::lock_guard<concurrency::mutex> guard(invalidator_state.lock);
+	auto txn_state = context.registered_state->GetOrCreate<ConditionCacheTxnState>(ConditionCacheTxnState::NAME);
+	txn_state->RecordRowGroups(table_oid, invalidator_state.affected_row_groups);
+
 	// For INSERT/MERGE modes: compute affected row groups from the inserted row range.
 	// New rows start at pre_insert_row_count and span inserted_row_count rows.
 	if (invalidator_state.inserted_row_count > 0) {

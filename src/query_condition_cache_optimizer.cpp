@@ -100,14 +100,14 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	}
 
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	auto entry = store->Lookup(context, key);
+	auto entry = store->Lookup(context, duck_table, key);
 
 	if (!entry) {
 		// TODO: Consider building cache in the background and syncing later
 		// to avoid blocking the first query.
 		entry = BuildCacheForPredicate(context, filter.expressions, get);
 		if (entry) {
-			store->Upsert(context, key, entry);
+			store->Upsert(context, duck_table, key, entry);
 		}
 	}
 

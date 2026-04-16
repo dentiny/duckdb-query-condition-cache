@@ -39,9 +39,10 @@ shared_ptr<ConditionCacheEntry> LookupEntry(Connection &con, const string &table
 	auto &table_entry = GetDuckTableEntry(context, table_name);
 	auto table_oid = table_entry.oid;
 	auto canonical_key = ComputeCanonicalPredicateKey(context, table_entry, predicate);
-	con.Commit();
 	auto store = GetStore(con);
-	return store->Lookup(context, {table_oid, canonical_key});
+	auto entry = store->Lookup(context, table_entry, {table_oid, canonical_key});
+	con.Commit();
+	return entry;
 }
 
 void BuildCache(Connection &con, const string &table_name, const string &predicate) {

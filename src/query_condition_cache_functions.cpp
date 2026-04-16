@@ -285,7 +285,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 
 	CacheKey key {bind_data.table_oid, std::move(canonical_key)};
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	store->Upsert(context, key, std::move(entry));
+	store->Upsert(context, table_entry, key, std::move(entry));
 
 	output.SetCardinality(1);
 	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
@@ -308,6 +308,9 @@ struct ConditionCacheInfoBindData : public TableFunctionData {
 	idx_t table_oid;
 	idx_t total_rows;
 	string canonical_key;
+	string catalog;
+	string schema;
+	string table;
 };
 
 struct ConditionCacheInfoState : public GlobalTableFunctionState {
@@ -325,6 +328,9 @@ unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFun
 	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, qname.catalog, qname.schema, qname.name);
 	result->table_oid = table_entry.oid;
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
+	result->catalog = qname.catalog;
+	result->schema = qname.schema;
+	result->table = qname.name;
 
 	result->canonical_key = ComputeCanonicalPredicateKey(context, table_entry, predicate_sql);
 
@@ -355,8 +361,10 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheInfoBindData>();
 	CacheKey key {bind_data.table_oid, bind_data.canonical_key};
+	auto &table_entry =
+	    Catalog::GetEntry<DuckTableEntry>(context, bind_data.catalog, bind_data.schema, bind_data.table);
 	auto store = ConditionCacheStore::GetOrCreate(context);
-	auto entry = store->Lookup(context, key);
+	auto entry = store->Lookup(context, table_entry, key);
 
 	output.SetCardinality(1);
 	if (entry) {
