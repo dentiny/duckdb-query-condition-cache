@@ -56,4 +56,42 @@ TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 		REQUIRE_FALSE(a.VectorHasRows(0));
 	}
 }
+
+TEST_CASE("RowGroupFilter - observed_vectors watermark", "[bitvector]") {
+	SECTION("default constructor leaves observed_vectors at 0") {
+		RowGroupFilter bv;
+		REQUIRE(bv.observed_vectors == 0);
+	}
+
+	SECTION("vector-of-indices constructor leaves observed_vectors at 0") {
+		RowGroupFilter bv({0, 5});
+		REQUIRE(bv.observed_vectors == 0);
+	}
+
+	SECTION("MergeFrom takes max of watermarks") {
+		RowGroupFilter a;
+		a.observed_vectors = 3;
+		RowGroupFilter b;
+		b.observed_vectors = 7;
+		a.MergeFrom(b);
+		REQUIRE(a.observed_vectors == 7);
+	}
+
+	SECTION("MergeFrom keeps higher watermark when other is lower") {
+		RowGroupFilter a;
+		a.observed_vectors = 10;
+		RowGroupFilter b;
+		b.observed_vectors = 4;
+		a.MergeFrom(b);
+		REQUIRE(a.observed_vectors == 10);
+	}
+
+	SECTION("MergeFrom from a default-watermark filter preserves existing watermark") {
+		RowGroupFilter a;
+		a.observed_vectors = 5;
+		RowGroupFilter empty;
+		a.MergeFrom(empty);
+		REQUIRE(a.observed_vectors == 5);
+	}
+}
 } // namespace duckdb

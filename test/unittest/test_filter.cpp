@@ -36,6 +36,9 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 	entry->SetQualifyingVector(/*rg_idx=*/0, /*vec_idx=*/5);
 	entry->EnsureRowGroup(/*rg_idx=*/1);
 	entry->SetQualifyingVector(/*rg_idx=*/2, /*vec_idx=*/10);
+	// CheckStatistics requires every row group in range to be fully observed before it can
+	// confidently report FILTER_ALWAYS_FALSE; emulate the full-build state for these tests.
+	entry->MarkAllRowGroupsFullyObserved();
 
 	auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
 	CacheExpressionFilter filter(std::move(dummy_expr), entry);
@@ -63,6 +66,51 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 
 	SECTION("stats without min/max: no pruning") {
 		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
+	}
+}
+
+TEST_CASE("CacheExpressionFilter - watermark gating", "[query_condition_cache]") {
+	SECTION("empty row group with watermark < full: no pruning") {
+		auto entry = make_shared_ptr<ConditionCacheEntry>();
+		entry->EnsureRowGroup(/*rg_idx=*/1); // observed_vectors defaults to 0
+
+		auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
+		CacheExpressionFilter filter(std::move(dummy_expr), entry);
+
+		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		NumericStats::SetMin(stats, Value::BIGINT(122880));
+		NumericStats::SetMax(stats, Value::BIGINT(200000));
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
+	}
+
+	SECTION("empty row group becomes prunable once marked fully observed") {
+		auto entry = make_shared_ptr<ConditionCacheEntry>();
+		entry->EnsureRowGroup(/*rg_idx=*/1);
+		entry->MarkAllRowGroupsFullyObserved();
+
+		auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
+		CacheExpressionFilter filter(std::move(dummy_expr), entry);
+
+		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		NumericStats::SetMin(stats, Value::BIGINT(122880));
+		NumericStats::SetMax(stats, Value::BIGINT(200000));
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::FILTER_ALWAYS_FALSE);
+	}
+
+	SECTION("range with one fully-observed empty rg and one absent rg: no pruning") {
+		auto entry = make_shared_ptr<ConditionCacheEntry>();
+		entry->EnsureRowGroup(/*rg_idx=*/1);
+		entry->MarkAllRowGroupsFullyObserved();
+		// rg 2 is intentionally absent: a range spanning rg 1 and rg 2 cannot be pruned because
+		// the cache has no information about rg 2.
+
+		auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
+		CacheExpressionFilter filter(std::move(dummy_expr), entry);
+
+		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		NumericStats::SetMin(stats, Value::BIGINT(122880));
+		NumericStats::SetMax(stats, Value::BIGINT(300000));
 		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
 	}
 }

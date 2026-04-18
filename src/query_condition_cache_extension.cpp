@@ -8,6 +8,7 @@
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "cache_invalidation_optimizer.hpp"
 #include "logical_cache_invalidator.hpp"
+#include "logical_cache_recorder.hpp"
 #include "query_condition_cache_filter.hpp"
 #include "query_condition_cache_functions.hpp"
 #include "query_condition_cache_optimizer.hpp"
@@ -43,6 +44,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	OptimizerExtension::Register(config, QueryConditionCacheOptimizer());
 	OptimizerExtension::Register(config, CacheInvalidationOptimizer());
 	OperatorExtension::Register(config, make_shared_ptr<CacheInvalidatorOperatorExtension>());
+	OperatorExtension::Register(config, make_shared_ptr<CacheRecorderOperatorExtension>());
 }
 } // namespace
 

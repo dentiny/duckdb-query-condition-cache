@@ -254,6 +254,8 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
 	MergeLocalCacheEntries(local_entries, entry);
+	// Full-table build observes every rg end-to-end; trust bits for pruning.
+	entry->MarkAllRowGroupsFullyObserved();
 
 	return entry;
 }
