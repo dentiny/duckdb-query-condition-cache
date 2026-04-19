@@ -1,5 +1,6 @@
 #include "catch/catch.hpp"
 #include "query_condition_cache_functions.hpp"
+#include "query_condition_cache_state.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -36,6 +37,11 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 
 		REQUIRE(entry != nullptr);
 		REQUIRE(entry->RowGroupCount() == 5);
+		// BuildCacheEntry must finalise the watermark so VectorPassesFilter / CheckStatistics
+		// trust the bitvectors for pruning.
+		for (idx_t rg = 0; rg < 5; ++rg) {
+			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+		}
 	}
 
 	SECTION("selective predicate") {
@@ -56,6 +62,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		REQUIRE(entry->RowGroupVectorHasQualifyingRows(0, 1));
 		REQUIRE_FALSE(entry->RowGroupVectorHasQualifyingRows(0, 2));
 		REQUIRE(entry->RowGroupIsCompletelyEmpty(1));
+		for (idx_t rg = 0; rg < 5; ++rg) {
+			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+		}
 	}
 
 	SECTION("odd values pass, even values don't") {
@@ -72,6 +81,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 
 		REQUIRE(entry != nullptr);
 		REQUIRE(entry->RowGroupCount() == 5);
+		for (idx_t rg = 0; rg < 5; ++rg) {
+			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+		}
 	}
 
 	SECTION("no matching rows") {
@@ -90,6 +102,11 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		REQUIRE(entry->RowGroupCount() == 5);
 		REQUIRE(entry->RowGroupIsCompletelyEmpty(0));
 		REQUIRE(entry->RowGroupIsCompletelyEmpty(4));
+		// Even when no rows match, every observed row group must be marked fully observed so
+		// CheckStatistics can prune them.
+		for (idx_t rg = 0; rg < 5; ++rg) {
+			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+		}
 	}
 }
 } // namespace duckdb

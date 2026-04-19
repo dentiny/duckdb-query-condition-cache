@@ -1,6 +1,7 @@
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/helper.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
@@ -35,6 +36,7 @@ void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
 	for (idx_t i = 0; i < BITVECTOR_ARRAY_SIZE; ++i) {
 		matching_vectors[i] |= other.matching_vectors[i];
 	}
+	observed_vectors = MaxValue(observed_vectors, other.observed_vectors);
 }
 
 // ------- CONDITION_CACHE_ENTRY -------
@@ -107,10 +109,25 @@ void ConditionCacheEntry::MergeFrom(const ConditionCacheEntry &other) {
 	}
 }
 
+void ConditionCacheEntry::MarkAllRowGroupsFullyObserved() {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	for (auto &[rg_idx, filter] : bitvectors) {
+		filter.observed_vectors = VECTORS_PER_ROW_GROUP;
+	}
+}
+
+void ConditionCacheEntry::SetRowGroupWatermark(idx_t rg_idx, idx_t observed) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	bitvectors[rg_idx].observed_vectors = observed;
+}
+
 bool ConditionCacheEntry::VectorPassesFilter(idx_t rg_idx, idx_t vec_idx) const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	auto it = bitvectors.find(rg_idx);
 	if (it == bitvectors.end()) {
+		return true;
+	}
+	if (vec_idx >= it->second.observed_vectors) {
 		return true;
 	}
 	return it->second.VectorHasRows(vec_idx);
@@ -121,6 +138,9 @@ bool ConditionCacheEntry::StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t ma
 	for (idx_t rg = min_rg; rg <= max_rg; ++rg) {
 		auto it = bitvectors.find(rg);
 		if (it == bitvectors.end() || !it->second.IsEmpty()) {
+			return false;
+		}
+		if (it->second.observed_vectors < VECTORS_PER_ROW_GROUP) {
 			return false;
 		}
 	}
@@ -135,6 +155,15 @@ idx_t ConditionCacheEntry::RowGroupCount() const {
 bool ConditionCacheEntry::HasRowGroup(idx_t rg_idx) const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return bitvectors.find(rg_idx) != bitvectors.end();
+}
+
+idx_t ConditionCacheEntry::GetObservedVectors(idx_t rg_idx) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto it = bitvectors.find(rg_idx);
+	if (it == bitvectors.end()) {
+		return 0;
+	}
+	return it->second.observed_vectors;
 }
 
 bool ConditionCacheEntry::RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const {
