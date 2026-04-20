@@ -280,6 +280,7 @@ void ConditionCacheStore::ClearAll(ClientContext &context) {
 		cache.Delete(MakeFilterKeyIndexKey(table_oid));
 	}
 	cached_table_oids.clear();
+	ResetStats();
 }
 
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {

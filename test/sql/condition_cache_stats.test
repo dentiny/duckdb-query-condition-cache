@@ -76,7 +76,7 @@ SELECT hit_count, access_count FROM condition_cache_stats();
 ----
 0	1
 
-# Second query on the same new predicate: optimizer finds the entry (hit)
+# Second query on the same new predicate: optimizer finds the entry
 statement ok
 SELECT count(*) FROM t WHERE val = 99;
 
@@ -85,12 +85,11 @@ SELECT hit_count, access_count FROM condition_cache_stats();
 ----
 1	2
 
-# Disabling the setting calls ClearAll, which drops all cache entries
+# Disabling the setting calls ClearAll, which drops all cache entries and resets all stats
 statement ok
 SET use_query_condition_cache = false;
 
-# Memory drops to zero; counters are NOT reset by ClearAll
 query III
 SELECT total_memory_bytes, hit_count, access_count FROM condition_cache_stats();
 ----
-0	1	2
+0	0	0
