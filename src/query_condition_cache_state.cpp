@@ -187,6 +187,11 @@ unordered_set<string> TableFilterKeyIndex::Take() {
 	return std::move(filter_keys);
 }
 
+unordered_set<string> TableFilterKeyIndex::Snapshot() {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	return filter_keys;
+}
+
 // ------- CONDITION_CACHE_STORE -------
 
 string ConditionCacheStore::MakeCacheKeyString(const CacheKey &key) {
@@ -275,11 +280,60 @@ void ConditionCacheStore::ClearAll(ClientContext &context) {
 		cache.Delete(MakeFilterKeyIndexKey(table_oid));
 	}
 	cached_table_oids.clear();
+	ResetStats();
 }
 
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	return cache.GetOrCreate<ConditionCacheStore>(CACHE_KEY);
+}
+
+void ConditionCacheStore::RecordAccess(bool hit) {
+	total_accesses.fetch_add(1, std::memory_order_relaxed);
+	if (hit) {
+		total_hits.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+void ConditionCacheStore::ResetStats() {
+	total_accesses.store(0, std::memory_order_relaxed);
+	total_hits.store(0, std::memory_order_relaxed);
+}
+
+idx_t ConditionCacheStore::ComputeTotalMemoryBytes(ClientContext &context) const {
+	auto &cache = ObjectCache::GetObjectCache(context);
+
+	unordered_set<idx_t> oid_snapshot;
+	{
+		concurrency::lock_guard<concurrency::mutex> guard(lock);
+		oid_snapshot = cached_table_oids;
+	}
+
+	idx_t total = 0;
+	for (auto table_oid : oid_snapshot) {
+		auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
+		if (!index) {
+			continue;
+		}
+		for (const auto &filter_key : index->Snapshot()) {
+			auto entry = cache.Get<ConditionCacheEntry>(MakeCacheKeyString(CacheKey {table_oid, filter_key}));
+			if (entry) {
+				auto mem = entry->GetEstimatedCacheMemory();
+				if (mem.IsValid()) {
+					total += mem.GetIndex();
+				}
+			}
+		}
+	}
+	return total;
+}
+
+CacheStoreStats ConditionCacheStore::GetStats(ClientContext &context) const {
+	return CacheStoreStats {
+	    .total_memory_bytes = ComputeTotalMemoryBytes(context),
+	    .hit_count = total_hits.load(std::memory_order_relaxed),
+	    .access_count = total_accesses.load(std::memory_order_relaxed),
+	};
 }
 
 } // namespace duckdb

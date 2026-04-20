@@ -11,6 +11,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -378,6 +379,77 @@ TableFunction ConditionCacheInfoFunction() {
 	    {LogicalType {LogicalTypeId::VARCHAR} /*table*/, LogicalType {LogicalTypeId::VARCHAR} /*predicate_sql*/},
 	    ConditionCacheInfoExecute, ConditionCacheInfoBind, ConditionCacheInfoInit);
 	return func;
+}
+
+// ------- condition_cache_stats() -------
+// Returns global cache statistics: total memory, hit count, access count.
+
+namespace {
+
+struct ConditionCacheStatsState : public GlobalTableFunctionState {
+	bool done = false;
+};
+
+unique_ptr<FunctionData> ConditionCacheStatsBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<string> &names) {
+	names.emplace_back("total_memory_bytes");
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
+	names.emplace_back("hit_count");
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
+	names.emplace_back("access_count");
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
+	return nullptr;
+}
+
+unique_ptr<GlobalTableFunctionState> ConditionCacheStatsInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<ConditionCacheStatsState>();
+}
+
+void ConditionCacheStatsExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &gstate = data_p.global_state->Cast<ConditionCacheStatsState>();
+	if (gstate.done) {
+		return;
+	}
+	gstate.done = true;
+
+	auto store = ConditionCacheStore::GetOrCreate(context);
+	auto stats = store->GetStats(context);
+
+	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value::UBIGINT(stats.total_memory_bytes));
+	output.data[1].SetValue(0, Value::UBIGINT(stats.hit_count));
+	output.data[2].SetValue(0, Value::UBIGINT(stats.access_count));
+}
+
+} // namespace
+
+TableFunction ConditionCacheStatsFunction() {
+	TableFunction func("condition_cache_stats", {}, ConditionCacheStatsExecute, ConditionCacheStatsBind,
+	                   ConditionCacheStatsInit);
+	return func;
+}
+
+// ------- condition_cache_reset_stats() -------
+// Scalar function: resets hit_count and access_count, returns true.
+
+namespace {
+
+unique_ptr<FunctionData> ConditionCacheResetStatsBind(ClientContext &context, ScalarFunction &bound_function,
+                                                      vector<unique_ptr<Expression>> &arguments) {
+	auto store = ConditionCacheStore::GetOrCreate(context);
+	store->ResetStats();
+	return nullptr;
+}
+
+void ConditionCacheResetStatsFn(DataChunk &args, ExpressionState &state, Vector &result) {
+	result.Reference(Value::BOOLEAN(true));
+}
+
+} // namespace
+
+ScalarFunction ConditionCacheResetStatsFunction() {
+	return ScalarFunction("condition_cache_reset_stats", {}, LogicalType {LogicalTypeId::BOOLEAN},
+	                      ConditionCacheResetStatsFn, ConditionCacheResetStatsBind);
 }
 
 } // namespace duckdb
