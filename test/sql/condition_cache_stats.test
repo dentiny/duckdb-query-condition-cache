@@ -1,0 +1,96 @@
+# name: test/sql/condition_cache_stats.test
+# description: Test predicate cache stats
+# group: [sql]
+
+require query_condition_cache
+
+# Before any cache activity: all stats are zero
+query III
+SELECT total_memory_bytes, hit_count, access_count FROM condition_cache_stats();
+----
+0	0	0
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+statement ok
+SELECT * FROM condition_cache_build('t', 'val = 42');
+
+query I
+SELECT total_memory_bytes > 0 FROM condition_cache_stats();
+----
+true
+
+query II
+SELECT hit_count, access_count FROM condition_cache_stats();
+----
+0	0
+
+# First auto query: optimizer finds the pre-built entry (hit)
+statement ok
+SELECT count(*) FROM t WHERE val = 42;
+
+query II
+SELECT hit_count, access_count FROM condition_cache_stats();
+----
+1	1
+
+# Second auto query: another hit
+statement ok
+SELECT count(*) FROM t WHERE val = 42;
+
+query II
+SELECT hit_count, access_count FROM condition_cache_stats();
+----
+2	2
+
+# Capture memory before reset to verify it is unchanged afterwards
+statement ok
+CREATE TABLE mem_before AS SELECT total_memory_bytes FROM condition_cache_stats();
+
+# Reset stats: clears counters but does NOT clear cache entries
+query I
+SELECT condition_cache_reset_stats();
+----
+true
+
+query II
+SELECT hit_count, access_count FROM condition_cache_stats();
+----
+0	0
+
+# Memory is unchanged after reset: must equal the value captured before reset
+query I
+SELECT (SELECT total_memory_bytes FROM condition_cache_stats()) =
+       (SELECT total_memory_bytes FROM mem_before);
+----
+true
+
+# First query on a new predicate (not pre-built): optimizer misses, builds entry
+statement ok
+SELECT count(*) FROM t WHERE val = 99;
+
+# access_count = 1, hit_count = 0 (first lookup was a miss)
+query II
+SELECT hit_count, access_count FROM condition_cache_stats();
+----
+0	1
+
+# Second query on the same new predicate: optimizer finds the entry (hit)
+statement ok
+SELECT count(*) FROM t WHERE val = 99;
+
+query II
+SELECT hit_count, access_count FROM condition_cache_stats();
+----
+1	2
+
+# Disabling the setting calls ClearAll, which drops all cache entries
+statement ok
+SET use_query_condition_cache = false;
+
+# Memory drops to zero; counters are NOT reset by ClearAll
+query III
+SELECT total_memory_bytes, hit_count, access_count FROM condition_cache_stats();
+----
+0	1	2

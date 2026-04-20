@@ -5,6 +5,7 @@
 #include "concurrency/thread_annotation.hpp"
 
 #include "duckdb/common/array.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -131,6 +132,14 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 	bool IsEmpty();
 	// Transfer ownership of all filter keys out. Clears the internal set.
 	unordered_set<string> Take();
+	// Return a copy of all filter keys without clearing the set.
+	unordered_set<string> Snapshot();
+};
+
+struct CacheStoreStats {
+	idx_t total_memory_bytes;
+	idx_t hit_count;
+	idx_t access_count;
 };
 
 // Stored in DuckDB's per-database ObjectCache
@@ -169,10 +178,25 @@ public:
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
+	// Record an optimizer lookup attempt. Call with hit=true if an existing entry was found.
+	void RecordAccess(bool hit);
+
+	// Reset hit_count and access_count to zero (does not clear cache entries).
+	void ResetStats();
+
+	// Compute the sum of estimated memory used by all live cache entries.
+	idx_t ComputeTotalMemoryBytes(ClientContext &context) const;
+
+	// Return a snapshot of current stats (memory + counters).
+	CacheStoreStats GetStats(ClientContext &context) const;
+
 private:
-	concurrency::mutex lock;
+	mutable concurrency::mutex lock;
 	// Tracks all table OIDs that have been cached, for ClearAll
 	unordered_set<idx_t> cached_table_oids DUCKDB_GUARDED_BY(lock);
+
+	atomic<idx_t> total_accesses {0};
+	atomic<idx_t> total_hits {0};
 
 	static string MakeCacheKeyString(const CacheKey &key);
 	static string MakeFilterKeyIndexKey(idx_t table_oid);
