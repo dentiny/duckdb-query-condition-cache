@@ -393,16 +393,15 @@ struct ConditionCacheStatsState : public GlobalTableFunctionState {
 unique_ptr<FunctionData> ConditionCacheStatsBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	names.emplace_back("total_memory_bytes");
-	return_types.emplace_back(LogicalType {LogicalTypeId::BIGINT});
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
 	names.emplace_back("hit_count");
-	return_types.emplace_back(LogicalType {LogicalTypeId::BIGINT});
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
 	names.emplace_back("access_count");
-	return_types.emplace_back(LogicalType {LogicalTypeId::BIGINT});
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
 	return nullptr;
 }
 
-unique_ptr<GlobalTableFunctionState> ConditionCacheStatsInit(ClientContext &context,
-                                                              TableFunctionInitInput &input) {
+unique_ptr<GlobalTableFunctionState> ConditionCacheStatsInit(ClientContext &context, TableFunctionInitInput &input) {
 	return make_uniq<ConditionCacheStatsState>();
 }
 
@@ -417,9 +416,9 @@ void ConditionCacheStatsExecute(ClientContext &context, TableFunctionInput &data
 	auto stats = store->GetStats(context);
 
 	output.SetCardinality(1);
-	output.data[0].SetValue(0, Value::BIGINT(static_cast<int64_t>(stats.total_memory_bytes)));
-	output.data[1].SetValue(0, Value::BIGINT(static_cast<int64_t>(stats.hit_count)));
-	output.data[2].SetValue(0, Value::BIGINT(static_cast<int64_t>(stats.access_count)));
+	output.data[0].SetValue(0, Value::UBIGINT(stats.total_memory_bytes));
+	output.data[1].SetValue(0, Value::UBIGINT(stats.hit_count));
+	output.data[2].SetValue(0, Value::UBIGINT(stats.access_count));
 }
 
 } // namespace

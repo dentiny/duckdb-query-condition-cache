@@ -178,16 +178,16 @@ public:
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
 
-	// Record an optimizer lookup attempt. Call with hit=true if an existing entry was found.
+	// Record an optimizer lookup attempt.
 	void RecordAccess(bool hit);
 
-	// Reset hit_count and access_count to zero (does not clear cache entries).
+	// Reset cache access stats.
 	void ResetStats();
 
 	// Compute the sum of estimated memory used by all live cache entries.
 	idx_t ComputeTotalMemoryBytes(ClientContext &context) const;
 
-	// Return a snapshot of current stats (memory + counters).
+	// Return a snapshot of current stats.
 	CacheStoreStats GetStats(ClientContext &context) const;
 
 private:
