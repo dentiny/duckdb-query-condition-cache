@@ -4,8 +4,6 @@
 #include "concurrency/thread_annotation.hpp"
 #include "query_condition_cache_state.hpp"
 
-#include "duckdb/common/optional_idx.hpp"
-#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
@@ -18,9 +16,6 @@ struct CacheRecorderLocalState : public OperatorState {
 	// Co-owned with the global state so bitvectors outlive this OperatorState.
 	shared_ptr<ConditionCacheEntry> local_entry;
 	ExpressionExecutor expr_executor;
-	// rg_idx -> highest vec_idx this task has seen.
-	unordered_map<idx_t, idx_t> max_vec_per_rg;
-	optional_idx current_rg;
 };
 
 struct CacheRecorderGlobalState : public GlobalOperatorState {
@@ -54,10 +49,10 @@ public:
 	string GetName() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
-	// Public so unit tests can drive the watermark/bitvector algorithm with synthetic
-	// (rg, vec, qualifying) tuples without a real pipeline.
-	static void RecordChunkObservation(ConditionCacheEntry &local_entry, unordered_map<idx_t, idx_t> &max_vec_per_rg,
-	                                   optional_idx &current_rg, idx_t rg_idx, idx_t vec_idx, bool has_qualifying);
+	// Public so unit tests can drive the algorithm with synthetic (rg, vec, qualifying) tuples
+	// without a real pipeline.
+	static void RecordChunkObservation(ConditionCacheEntry &local_entry, idx_t rg_idx, idx_t vec_idx,
+	                                   bool has_qualifying);
 };
 
 } // namespace duckdb

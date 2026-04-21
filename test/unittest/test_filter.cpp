@@ -70,10 +70,10 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 	}
 }
 
-TEST_CASE("CacheExpressionFilter - watermark gating", "[query_condition_cache]") {
-	SECTION("empty row group with watermark < full: no pruning") {
+TEST_CASE("CacheExpressionFilter - observed-bit gating", "[query_condition_cache]") {
+	SECTION("empty row group with no observed bits: no pruning") {
 		auto entry = make_shared_ptr<ConditionCacheEntry>();
-		entry->EnsureRowGroup(/*rg_idx=*/1); // observed_vectors defaults to 0
+		entry->EnsureRowGroup(/*rg_idx=*/1); // observed bits all zero
 
 		auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
 		CacheExpressionFilter filter(std::move(dummy_expr), entry);

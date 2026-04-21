@@ -40,7 +40,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		// BuildCacheEntry must finalise the watermark so VectorPassesFilter / CheckStatistics
 		// trust the bitvectors for pruning.
 		for (idx_t rg = 0; rg < 5; ++rg) {
-			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+			REQUIRE(entry->GetObservedVectorCount(rg) == VECTORS_PER_ROW_GROUP);
 		}
 	}
 
@@ -63,7 +63,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		REQUIRE_FALSE(entry->RowGroupVectorHasQualifyingRows(0, 2));
 		REQUIRE(entry->RowGroupIsCompletelyEmpty(1));
 		for (idx_t rg = 0; rg < 5; ++rg) {
-			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+			REQUIRE(entry->GetObservedVectorCount(rg) == VECTORS_PER_ROW_GROUP);
 		}
 	}
 
@@ -82,7 +82,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		REQUIRE(entry != nullptr);
 		REQUIRE(entry->RowGroupCount() == 5);
 		for (idx_t rg = 0; rg < 5; ++rg) {
-			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+			REQUIRE(entry->GetObservedVectorCount(rg) == VECTORS_PER_ROW_GROUP);
 		}
 	}
 
@@ -105,7 +105,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		// Even when no rows match, every observed row group must be marked fully observed so
 		// CheckStatistics can prune them.
 		for (idx_t rg = 0; rg < 5; ++rg) {
-			REQUIRE(entry->GetObservedVectors(rg) == VECTORS_PER_ROW_GROUP);
+			REQUIRE(entry->GetObservedVectorCount(rg) == VECTORS_PER_ROW_GROUP);
 		}
 	}
 }

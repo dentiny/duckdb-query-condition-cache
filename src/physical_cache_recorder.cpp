@@ -81,34 +81,15 @@ OperatorResultType PhysicalCacheRecorder::Execute(ExecutionContext &context, Dat
 	SelectionVector sel(input.size());
 	idx_t match_count = local_state.expr_executor.SelectExpression(input, sel);
 
-	RecordChunkObservation(*local_state.local_entry, local_state.max_vec_per_rg, local_state.current_rg, rg_idx,
-	                       vec_idx, /*has_qualifying=*/match_count > 0);
+	RecordChunkObservation(*local_state.local_entry, rg_idx, vec_idx, /*has_qualifying=*/match_count > 0);
 
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
-// TODO: advance the watermark aggressively on vec_idx jumps (intermediate vecs filtered
-// out by column filters) and on rg transitions (close rg to its true vec count from
-// storage) instead of the current +1-per-transition policy.
-void PhysicalCacheRecorder::RecordChunkObservation(ConditionCacheEntry &local_entry,
-                                                   unordered_map<idx_t, idx_t> &max_vec_per_rg,
-                                                   optional_idx &current_rg, idx_t rg_idx, idx_t vec_idx,
+void PhysicalCacheRecorder::RecordChunkObservation(ConditionCacheEntry &local_entry, idx_t rg_idx, idx_t vec_idx,
                                                    bool has_qualifying) {
-	if (current_rg.IsValid() && current_rg.GetIndex() != rg_idx) {
-		idx_t prev_rg = current_rg.GetIndex();
-		local_entry.SetRowGroupWatermark(prev_rg, max_vec_per_rg[prev_rg] + 1);
-	}
-
-	auto it = max_vec_per_rg.find(rg_idx);
-	bool first_chunk_for_rg = it == max_vec_per_rg.end();
-	if (first_chunk_for_rg) {
-		local_entry.EnsureRowGroup(rg_idx);
-	} else if (vec_idx > it->second) {
-		local_entry.SetRowGroupWatermark(rg_idx, it->second + 1);
-	}
-	max_vec_per_rg[rg_idx] = vec_idx;
-	current_rg = optional_idx(rg_idx);
-
+	local_entry.EnsureRowGroup(rg_idx);
+	local_entry.SetObservedVector(rg_idx, vec_idx);
 	if (has_qualifying) {
 		local_entry.SetQualifyingVector(rg_idx, vec_idx);
 	}

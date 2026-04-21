@@ -57,41 +57,58 @@ TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 	}
 }
 
-TEST_CASE("RowGroupFilter - observed_vectors watermark", "[bitvector]") {
-	SECTION("default constructor leaves observed_vectors at 0") {
+TEST_CASE("RowGroupFilter - observed bitmask", "[bitvector]") {
+	SECTION("default constructor leaves observed bits all zero") {
 		RowGroupFilter bv;
-		REQUIRE(bv.observed_vectors == 0);
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			REQUIRE_FALSE(bv.IsObserved(i));
+		}
+		REQUIRE_FALSE(bv.IsFullyObserved());
 	}
 
-	SECTION("vector-of-indices constructor leaves observed_vectors at 0") {
+	SECTION("vector-of-indices constructor leaves observed bits all zero") {
 		RowGroupFilter bv({0, 5});
-		REQUIRE(bv.observed_vectors == 0);
+		REQUIRE_FALSE(bv.IsObserved(0));
+		REQUIRE_FALSE(bv.IsObserved(5));
 	}
 
-	SECTION("MergeFrom takes max of watermarks") {
+	SECTION("SetObserved sets the bit") {
+		RowGroupFilter bv;
+		bv.SetObserved(3);
+		bv.SetObserved(7);
+		REQUIRE(bv.IsObserved(3));
+		REQUIRE(bv.IsObserved(7));
+		REQUIRE_FALSE(bv.IsObserved(4));
+	}
+
+	SECTION("IsFullyObserved true only when every vec bit set") {
+		RowGroupFilter bv;
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			bv.SetObserved(i);
+		}
+		REQUIRE(bv.IsFullyObserved());
+	}
+
+	SECTION("MergeFrom ORs observed bits") {
 		RowGroupFilter a;
-		a.observed_vectors = 3;
+		a.SetObserved(1);
+		a.SetObserved(3);
 		RowGroupFilter b;
-		b.observed_vectors = 7;
+		b.SetObserved(2);
+		b.SetObserved(3);
 		a.MergeFrom(b);
-		REQUIRE(a.observed_vectors == 7);
+		REQUIRE(a.IsObserved(1));
+		REQUIRE(a.IsObserved(2));
+		REQUIRE(a.IsObserved(3));
+		REQUIRE_FALSE(a.IsObserved(0));
 	}
 
-	SECTION("MergeFrom keeps higher watermark when other is lower") {
+	SECTION("MergeFrom from an empty filter preserves existing observed bits") {
 		RowGroupFilter a;
-		a.observed_vectors = 10;
-		RowGroupFilter b;
-		b.observed_vectors = 4;
-		a.MergeFrom(b);
-		REQUIRE(a.observed_vectors == 10);
-	}
-
-	SECTION("MergeFrom from a default-watermark filter preserves existing watermark") {
-		RowGroupFilter a;
-		a.observed_vectors = 5;
+		a.SetObserved(5);
 		RowGroupFilter empty;
 		a.MergeFrom(empty);
-		REQUIRE(a.observed_vectors == 5);
+		REQUIRE(a.IsObserved(5));
 	}
 }
 } // namespace duckdb
