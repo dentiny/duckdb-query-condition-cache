@@ -319,9 +319,8 @@ idx_t ConditionCacheStore::ComputeTotalMemoryBytes(ClientContext &context) const
 			auto entry = cache.Get<ConditionCacheEntry>(MakeCacheKeyString(CacheKey {table_oid, filter_key}));
 			if (entry) {
 				auto mem = entry->GetEstimatedCacheMemory();
-				if (mem.IsValid()) {
-					total += mem.GetIndex();
-				}
+				ALWAYS_ASSERT(mem.IsValid());
+				total += mem.GetIndex();
 			}
 		}
 	}
