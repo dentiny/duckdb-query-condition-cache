@@ -56,4 +56,59 @@ TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 		REQUIRE_FALSE(a.VectorHasRows(0));
 	}
 }
+
+TEST_CASE("RowGroupFilter - observed bitmask", "[bitvector]") {
+	SECTION("default constructor leaves observed bits all zero") {
+		RowGroupFilter bv;
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			REQUIRE_FALSE(bv.IsObserved(i));
+		}
+		REQUIRE_FALSE(bv.IsFullyObserved());
+	}
+
+	SECTION("vector-of-indices constructor leaves observed bits all zero") {
+		RowGroupFilter bv({0, 5});
+		REQUIRE_FALSE(bv.IsObserved(0));
+		REQUIRE_FALSE(bv.IsObserved(5));
+	}
+
+	SECTION("SetObserved sets the bit") {
+		RowGroupFilter bv;
+		bv.SetObserved(3);
+		bv.SetObserved(7);
+		REQUIRE(bv.IsObserved(3));
+		REQUIRE(bv.IsObserved(7));
+		REQUIRE_FALSE(bv.IsObserved(4));
+	}
+
+	SECTION("IsFullyObserved true only when every vec bit set") {
+		RowGroupFilter bv;
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			bv.SetObserved(i);
+		}
+		REQUIRE(bv.IsFullyObserved());
+	}
+
+	SECTION("MergeFrom ORs observed bits") {
+		RowGroupFilter a;
+		a.SetObserved(1);
+		a.SetObserved(3);
+		RowGroupFilter b;
+		b.SetObserved(2);
+		b.SetObserved(3);
+		a.MergeFrom(b);
+		REQUIRE(a.IsObserved(1));
+		REQUIRE(a.IsObserved(2));
+		REQUIRE(a.IsObserved(3));
+		REQUIRE_FALSE(a.IsObserved(0));
+	}
+
+	SECTION("MergeFrom from an empty filter preserves existing observed bits") {
+		RowGroupFilter a;
+		a.SetObserved(5);
+		RowGroupFilter empty;
+		a.MergeFrom(empty);
+		REQUIRE(a.IsObserved(5));
+	}
+}
 } // namespace duckdb

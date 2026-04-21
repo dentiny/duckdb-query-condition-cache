@@ -17,7 +17,8 @@ set(QUERY_CACHE_UNITTEST_OBJECTS
     test_logical_cache_invalidator.cpp
     test_normalize_expression.cpp
     test_optimizer_invalidation.cpp
-    test_physical_cache_invalidator.cpp)
+    test_physical_cache_invalidator.cpp
+    test_physical_cache_recorder.cpp)
 
 add_executable(unittest_query_condition_cache ${QUERY_CACHE_UNITTEST_OBJECTS})
 

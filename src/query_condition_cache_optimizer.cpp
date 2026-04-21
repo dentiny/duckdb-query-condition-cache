@@ -1,5 +1,6 @@
 #include "query_condition_cache_optimizer.hpp"
 
+#include "logical_cache_recorder.hpp"
 #include "query_condition_cache_filter.hpp"
 #include "predicate_key_utils.hpp"
 #include "query_condition_cache_functions.hpp"
@@ -42,13 +43,31 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	auto query_state =
 	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
 	query_state->cache_apply_pending.clear();
+	query_state->cache_recorder_pending.clear();
 	try {
 		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
 	} catch (...) {
 		// Defense in depth: skip cache optimization rather than failing the query.
 		query_state->cache_apply_pending.clear();
+		query_state->cache_recorder_pending.clear();
 	}
 }
+
+namespace {
+
+// BoundColumnRef.column_index == chunk position at runtime, so we can rewrite directly
+// to BoundReference(column_index).
+void ConvertColumnRefsToChunkRefs(unique_ptr<Expression> &expr) {
+	if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		auto &colref = expr->Cast<BoundColumnRefExpression>();
+		expr = make_uniq<BoundReferenceExpression>(colref.alias, colref.return_type, colref.binding.column_index);
+		return;
+	}
+	ExpressionIterator::EnumerateChildren(*expr,
+	                                      [&](unique_ptr<Expression> &child) { ConvertColumnRefsToChunkRefs(child); });
+}
+
+} // namespace
 
 void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
                                                    bool inside_dml, CacheOptimizerQueryState &state) {
@@ -103,62 +122,30 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	auto entry = store->Lookup(context, key);
 
 	if (!entry) {
-		// TODO: Consider building cache in the background and syncing later
-		// to avoid blocking the first query.
-		entry = BuildCacheForPredicate(context, filter.expressions, get);
-		if (entry) {
-			store->Upsert(context, key, entry);
+		// Upsert the empty entry up front so the cache filter's bind_data and the recorder's
+		// Finalize Lookup resolve to the same shared_ptr.
+		entry = make_shared_ptr<ConditionCacheEntry>();
+		store->Upsert(context, key, entry);
+
+		// TODO: Also inject the recorder on a partial cache hit so the watermark can
+		// advance on later queries and DML-dropped rgs get re-observed. Must skip under
+		// LogicalLimit: a truncated scan cannot distinguish "unobserved" from "no match".
+		vector<unique_ptr<Expression>> cloned;
+		cloned.reserve(filter.expressions.size());
+		for (const auto &expr : filter.expressions) {
+			auto copy = expr->Copy();
+			ConvertColumnRefsToChunkRefs(copy);
+			cloned.push_back(std::move(copy));
 		}
+		auto predicate = CombineWithAnd(std::move(cloned));
+		predicate =
+		    BoundCastExpression::AddCastToType(context, std::move(predicate), LogicalType {LogicalTypeId::BOOLEAN});
+
+		state.cache_recorder_pending[get.table_index] =
+		    RecorderInjectionInfo {table->oid, key.filter_key, std::move(predicate)};
 	}
 
-	if (entry) {
-		state.cache_apply_pending[get.table_index] = std::move(entry);
-	}
-}
-
-namespace {
-
-// Rewrite BoundColumnRefExpression -> BoundReferenceExpression(storage OID),
-// the shape BuildCacheEntry expects. The source column_index is a position
-// into LogicalGet::column_ids, which maps to the storage OID.
-void ConvertColumnRefsToScanRefs(unique_ptr<Expression> &expr, const LogicalGet &get) {
-	if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-		auto &colref = expr->Cast<BoundColumnRefExpression>();
-		auto &column_ids = get.GetColumnIds();
-		auto col_idx = colref.binding.column_index;
-		ALWAYS_ASSERT(col_idx < column_ids.size());
-		auto storage_oid = column_ids[col_idx].GetPrimaryIndex();
-		expr = make_uniq<BoundReferenceExpression>(colref.alias, colref.return_type, storage_oid);
-		return;
-	}
-	ExpressionIterator::EnumerateChildren(
-	    *expr, [&](unique_ptr<Expression> &child) { ConvertColumnRefsToScanRefs(child, get); });
-}
-
-} // namespace
-
-shared_ptr<ConditionCacheEntry> QueryConditionCacheOptimizer::BuildCacheForPredicate(
-    ClientContext &context, const vector<unique_ptr<Expression>> &expressions, LogicalGet &get) {
-	auto table_ptr = get.GetTable();
-	if (!table_ptr) {
-		return nullptr;
-	}
-	auto &table_entry = table_ptr->Cast<DuckTableEntry>();
-
-	// Clone the plan's already-bound filter expressions and remap column refs
-	// to storage OIDs.
-	vector<unique_ptr<Expression>> cloned;
-	cloned.reserve(expressions.size());
-	for (const auto &expr : expressions) {
-		auto copy = expr->Copy();
-		ConvertColumnRefsToScanRefs(copy, get);
-		cloned.push_back(std::move(copy));
-	}
-
-	auto predicate = CombineWithAnd(std::move(cloned));
-	predicate = BoundCastExpression::AddCastToType(context, std::move(predicate), LogicalType {LogicalTypeId::BOOLEAN});
-
-	return BuildCacheEntry(context, table_entry, *predicate);
+	state.cache_apply_pending[get.table_index] = std::move(entry);
 }
 
 void QueryConditionCacheOptimizer::PostOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
@@ -179,6 +166,13 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(ClientContext &context, uniq
 
 	InjectCacheFilter(context, get, entry->second);
 	state.cache_apply_pending.erase(entry);
+
+	auto recorder_it = state.cache_recorder_pending.find(get.table_index);
+	if (recorder_it != state.cache_recorder_pending.end()) {
+		auto info = std::move(recorder_it->second);
+		state.cache_recorder_pending.erase(recorder_it);
+		InjectCacheRecorder(context, plan, std::move(info));
+	}
 }
 
 void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, LogicalGet &get,
@@ -212,13 +206,57 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, Log
 	                             make_uniq<CacheExpressionFilter>(std::move(filter_expr), entry));
 }
 
+void QueryConditionCacheOptimizer::InjectCacheRecorder(ClientContext &context, unique_ptr<LogicalOperator> &plan,
+                                                       RecorderInjectionInfo &&info) {
+	D_ASSERT(plan->type == LogicalOperatorType::LOGICAL_GET);
+	auto &get = plan->Cast<LogicalGet>();
+	auto &column_ids = get.GetMutableColumnIds();
+
+	// ROW_ID was added to column_ids by InjectCacheFilter; we also surface it through
+	// projection_ids so it reaches the recorder's input chunk.
+	idx_t rowid_column_ids_pos = column_ids.size();
+	for (idx_t ii = 0; ii < column_ids.size(); ++ii) {
+		if (column_ids[ii].IsRowIdColumn()) {
+			rowid_column_ids_pos = ii;
+			break;
+		}
+	}
+	D_ASSERT(rowid_column_ids_pos < column_ids.size());
+
+	// Chunk-level position = column_ids position if no projection, otherwise the matching
+	// (or newly appended) projection_ids slot.
+	idx_t rowid_chunk_idx;
+	if (get.projection_ids.empty()) {
+		rowid_chunk_idx = rowid_column_ids_pos;
+	} else {
+		idx_t found = get.projection_ids.size();
+		for (idx_t ii = 0; ii < get.projection_ids.size(); ++ii) {
+			if (get.projection_ids[ii] == rowid_column_ids_pos) {
+				found = ii;
+				break;
+			}
+		}
+		if (found < get.projection_ids.size()) {
+			rowid_chunk_idx = found;
+		} else {
+			get.projection_ids.push_back(rowid_column_ids_pos);
+			rowid_chunk_idx = get.projection_ids.size() - 1;
+		}
+	}
+
+	auto recorder = make_uniq<LogicalCacheRecorder>(info.table_oid, std::move(info.canonical_key),
+	                                                std::move(info.predicate), rowid_chunk_idx);
+	recorder->children.push_back(std::move(plan));
+	plan = std::move(recorder);
+}
+
 void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	if (!IsSettingEnabled(input.context)) {
 		return;
 	}
 
 	auto query_state = input.context.registered_state->Get<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
-	if (!query_state || query_state->cache_apply_pending.empty()) {
+	if (!query_state || (query_state->cache_apply_pending.empty() && query_state->cache_recorder_pending.empty())) {
 		return;
 	}
 

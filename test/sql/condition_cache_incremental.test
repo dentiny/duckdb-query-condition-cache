@@ -1,0 +1,95 @@
+# name: test/sql/condition_cache_incremental.test
+# description: Optimizer injects recorder on miss; cache builds as a query side-effect.
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+# Empty cache.
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+0	0	0	0
+
+# First query populates cache via recorder side-effect.
+query I
+SELECT count(*) FROM t WHERE val = 42;
+----
+5000
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245
+
+# Repeat: hit, no re-injection.
+query I
+SELECT count(*) FROM t WHERE val = 42;
+----
+5000
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245
+
+# Selective predicate: only rg 0 has matches; rgs 1..4 keyed as empty for pruning.
+query I
+SELECT count(*) FROM t WHERE id < 3000;
+----
+3000
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'id < 3000');
+----
+1	5	2	245
+
+query I
+SELECT count(*) FROM t WHERE id < 3000;
+----
+3000
+
+# Predicate matching nothing still keys every rg as observed empty.
+query I
+SELECT count(*) FROM t WHERE id < 0;
+----
+0
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'id < 0');
+----
+0	5	0	245
+
+query I
+SELECT count(*) FROM t WHERE id < 0;
+----
+0
+
+# Disable clears cache; re-enable starts from a clean slate.
+statement ok
+SET use_query_condition_cache = false;
+
+query I
+SELECT count(*) FROM t WHERE val = 42;
+----
+5000
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+0	0	0	0
+
+statement ok
+SET use_query_condition_cache = true;
+
+query I
+SELECT count(*) FROM t WHERE val = 42;
+----
+5000
+
+query IIII
+SELECT * FROM condition_cache_info('t', 'val = 42');
+----
+5	5	245	245
