@@ -2,6 +2,7 @@
 
 #include "query_condition_cache_state.hpp"
 
+#include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
 
 namespace duckdb {
@@ -18,5 +19,7 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 
 TableFunction ConditionCacheBuildFunction();
 TableFunction ConditionCacheInfoFunction();
+TableFunction ConditionCacheStatsFunction();
+ScalarFunction ConditionCacheResetStatsFunction();
 
 } // namespace duckdb

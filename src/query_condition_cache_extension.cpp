@@ -28,6 +28,8 @@ void OnQueryConditionCacheSettingChange(ClientContext &context, SetScope scope, 
 void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ConditionCacheBuildFunction());
 	loader.RegisterFunction(ConditionCacheInfoFunction());
+	loader.RegisterFunction(ConditionCacheStatsFunction());
+	loader.RegisterFunction(ConditionCacheResetStatsFunction());
 
 	// Register the internal filter function so it survives plan serialization/verification
 	loader.RegisterFunction(ConditionCacheFilterFunction());

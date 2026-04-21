@@ -101,6 +101,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(context, key);
+	store->RecordAccess(entry != nullptr);
 
 	if (!entry) {
 		// TODO: Consider building cache in the background and syncing later
