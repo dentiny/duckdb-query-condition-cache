@@ -1,0 +1,39 @@
+# name: test/sql/condition_cache_explain.test
+# description: Test condition cache stats in EXPLAIN ANALYZE and JSON profiling
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+CREATE TABLE t AS SELECT i AS id FROM range(500000) t(i);
+
+query II
+EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM t WHERE id < 3000;
+----
+analyzed_plan	<REGEX>:.*"Condition Cache": "MISS -> BUILT".*"Condition Cache Predicate Hash": "[0-9]+".*"Condition Cache Cached Row Groups": "5".*"Condition Cache Qualifying Vectors": "2/245".*
+
+statement ok
+PRAGMA enable_profiling='json';
+
+statement ok
+PRAGMA profiling_output='__TEST_DIR__/condition_cache_profile.json';
+
+statement ok
+SELECT count(*) FROM t WHERE id < 3000;
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT contains(profile_json, 'Condition Cache')
+       AND contains(profile_json, 'HIT')
+       AND contains(profile_json, 'Condition Cache Predicate Hash')
+       AND contains(profile_json, 'Condition Cache Cached Row Groups')
+       AND contains(profile_json, 'Condition Cache Qualifying Vectors')
+       AND contains(profile_json, '2/245')
+FROM (
+    SELECT string_agg(json, '\n') AS profile_json
+    FROM read_csv('__TEST_DIR__/condition_cache_profile.json', columns={'json': 'VARCHAR'}, sep='🦆')
+);
+----
+true
