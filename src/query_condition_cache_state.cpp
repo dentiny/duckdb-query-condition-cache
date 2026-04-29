@@ -10,31 +10,28 @@ namespace duckdb {
 
 RowGroupFilter::RowGroupFilter(const vector<idx_t> &qualifying_vectors) {
 	for (const auto &vec_idx : qualifying_vectors) {
-		matching_vectors.at(vec_idx / 64) |= (1ULL << (vec_idx % 64));
+		matching_vectors.set(vec_idx);
 	}
 }
 
 void RowGroupFilter::SetVector(idx_t vector_index) {
-	matching_vectors.at(vector_index / 64) |= (1ULL << (vector_index % 64));
+	matching_vectors.set(vector_index);
 }
 
 bool RowGroupFilter::VectorHasRows(idx_t vector_index) const {
-	return (matching_vectors.at(vector_index / 64) >> (vector_index % 64)) & 1ULL;
+	return matching_vectors.test(vector_index);
 }
 
 bool RowGroupFilter::IsEmpty() const {
-	for (const auto &w : matching_vectors) {
-		if (w != 0) {
-			return false;
-		}
-	}
-	return true;
+	return matching_vectors.none();
+}
+
+idx_t RowGroupFilter::QualifyingVectorCount() const {
+	return matching_vectors.count();
 }
 
 void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
-	for (idx_t i = 0; i < BITVECTOR_ARRAY_SIZE; ++i) {
-		matching_vectors[i] |= other.matching_vectors[i];
-	}
+	matching_vectors |= other.matching_vectors;
 }
 
 // ------- CONDITION_CACHE_ENTRY -------
@@ -48,7 +45,6 @@ optional_idx ConditionCacheEntry::GetEstimatedCacheMemory() const {
 
 CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
 
 	idx_t qualifying_vectors = 0;
 	idx_t qualifying_row_groups = 0;
@@ -56,16 +52,12 @@ CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
 		if (!filter.IsEmpty()) {
 			++qualifying_row_groups;
 		}
-		for (idx_t v = 0; v < vectors_per_row_group; ++v) {
-			if (filter.VectorHasRows(v)) {
-				++qualifying_vectors;
-			}
-		}
+		qualifying_vectors += filter.QualifyingVectorCount();
 	}
 
 	idx_t full_row_groups = total_rows / DEFAULT_ROW_GROUP_SIZE;
 	idx_t remaining_rows = total_rows % DEFAULT_ROW_GROUP_SIZE;
-	idx_t total_vectors = full_row_groups * vectors_per_row_group;
+	idx_t total_vectors = full_row_groups * VECTORS_PER_ROW_GROUP;
 	if (remaining_rows > 0) {
 		total_vectors += (remaining_rows + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
 	}
