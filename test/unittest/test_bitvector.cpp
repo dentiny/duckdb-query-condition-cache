@@ -56,4 +56,82 @@ TEST_CASE("RowGroupFilter - basic operations", "[bitvector]") {
 		REQUIRE_FALSE(a.VectorHasRows(0));
 	}
 }
+
+TEST_CASE("RowGroupFilter - observed bitmask", "[bitvector]") {
+	SECTION("default constructor leaves observed bits all zero") {
+		RowGroupFilter bv;
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			REQUIRE_FALSE(bv.IsObserved(i));
+		}
+		REQUIRE_FALSE(bv.IsFullyObserved());
+	}
+
+	SECTION("vector-of-indices constructor leaves observed bits all zero") {
+		RowGroupFilter bv({0, 5});
+		REQUIRE_FALSE(bv.IsObserved(0));
+		REQUIRE_FALSE(bv.IsObserved(5));
+	}
+
+	SECTION("SetObserved sets the bit") {
+		RowGroupFilter bv;
+		bv.SetObserved(3);
+		bv.SetObserved(7);
+		REQUIRE(bv.IsObserved(3));
+		REQUIRE(bv.IsObserved(7));
+		REQUIRE_FALSE(bv.IsObserved(4));
+	}
+
+	SECTION("IsFullyObserved true only when every vec bit set") {
+		RowGroupFilter bv;
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			bv.SetObserved(i);
+		}
+		REQUIRE(bv.IsFullyObserved());
+	}
+
+	SECTION("MarkFullyObserved sets every observed bit") {
+		RowGroupFilter bv;
+		bv.MarkFullyObserved();
+		REQUIRE(bv.IsFullyObserved());
+		for (idx_t i = 0; i < VECTORS_PER_ROW_GROUP; ++i) {
+			REQUIRE(bv.IsObserved(i));
+		}
+	}
+
+	SECTION("MergeFrom ORs observed bits") {
+		RowGroupFilter a;
+		a.SetObserved(1);
+		a.SetObserved(3);
+		RowGroupFilter b;
+		b.SetObserved(2);
+		b.SetObserved(3);
+		a.MergeFrom(b);
+		REQUIRE(a.IsObserved(1));
+		REQUIRE(a.IsObserved(2));
+		REQUIRE(a.IsObserved(3));
+		REQUIRE_FALSE(a.IsObserved(0));
+	}
+
+	SECTION("MergeFrom from an empty filter preserves existing observed bits") {
+		RowGroupFilter a;
+		a.SetObserved(5);
+		RowGroupFilter empty;
+		a.MergeFrom(empty);
+		REQUIRE(a.IsObserved(5));
+	}
+}
+
+TEST_CASE("ConditionCacheEntry - unobserved vector ranges", "[bitvector]") {
+	ConditionCacheEntry entry;
+	entry.SetObservedVector(/*rg_idx=*/0, /*vec_idx=*/0);
+	entry.SetObservedVector(/*rg_idx=*/0, /*vec_idx=*/1);
+	for (idx_t rg = 1; rg < 5; ++rg) {
+		entry.MarkRowGroupFullyObserved(rg);
+	}
+
+	auto ranges = entry.GetUnobservedVectorRanges(/*total_rows=*/500000);
+	REQUIRE(ranges.size() == 1);
+	REQUIRE(ranges[0].start_row == 2 * STANDARD_VECTOR_SIZE);
+	REQUIRE(ranges[0].count == DEFAULT_ROW_GROUP_SIZE - (2 * STANDARD_VECTOR_SIZE));
+}
 } // namespace duckdb

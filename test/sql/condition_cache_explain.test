@@ -1,0 +1,51 @@
+# name: test/sql/condition_cache_explain.test
+# description: Test condition cache plan injection with explain
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(1000) t(i);
+
+# Cache miss: inject both the recorder and the cache filter.
+query TT
+EXPLAIN SELECT count(*) FROM t WHERE val = 42;
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*Aggregates:.*count_star\(\).*CACHE_RECORDER.*Table OID: [0-9]+.*Filter Key:.*\(val = CAST\(42 AS BIGINT\)\).*Row ID Column: 1.*SEQ_SCAN.*Table: memory\.main\.t.*Type: Sequential Scan.*Projections: val.*Filters:.*val=42.*__condition_cache_filter.*\(rowid\).*~11 rows.*
+
+statement ok
+SELECT count(*) FROM t WHERE val = 42;
+
+# Cache hit: keep the cache filter, but do not re-inject the recorder.
+query TT
+EXPLAIN SELECT count(*) FROM t WHERE val = 42;
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*Aggregates:.*count_star\(\).*SEQ_SCAN.*Table: memory\.main\.t.*Type: Sequential Scan.*Projections: val.*Filters:.*val=42.*__condition_cache_filter.*\(rowid\).*~11 rows.*
+
+# Cache hit with new row groups: re-inject the recorder so missing coverage can be extended.
+statement ok
+CREATE TABLE t_full AS SELECT i AS id, i % 100 AS val FROM range(122880) t(i);
+
+query I
+SELECT count(*) FROM t_full WHERE val = 42;
+----
+1229
+
+statement ok
+INSERT INTO t_full
+SELECT i + 122880, (i + 122880) % 100
+FROM range(1000) t(i);
+
+query TT
+EXPLAIN SELECT count(*) FROM t_full WHERE val = 42;
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*Aggregates:.*count_star\(\).*CACHE_RECORDER.*Table OID: [0-9]+.*Filter Key:.*\(val = CAST\(42 AS BIGINT\)\).*Row ID Column: 1.*SEQ_SCAN.*Table:.*memory\.main\.t_full.*Type: Sequential Scan.*Projections: val.*Filters:.*val=42.*__condition_cache_filter.*\(rowid\).*~1,265 rows.*
+
+# Truncating queries skip side-effect cache building on a miss.
+query TT
+EXPLAIN SELECT * FROM t WHERE val = 7 LIMIT 1;
+----
+physical_plan	<REGEX>:.*PROJECTION.*id.*val.*~0 rows.*STREAMING_LIMIT.*SEQ_SCAN.*Table: memory\.main\.t.*Type: Sequential Scan.*Projections:.*val.*id.*Filters: val=7.*~11 rows.*

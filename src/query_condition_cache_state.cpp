@@ -10,31 +10,41 @@ namespace duckdb {
 
 RowGroupFilter::RowGroupFilter(const vector<idx_t> &qualifying_vectors) {
 	for (const auto &vec_idx : qualifying_vectors) {
-		matching_vectors.at(vec_idx / 64) |= (1ULL << (vec_idx % 64));
+		matching_vectors.set(vec_idx);
 	}
 }
 
 void RowGroupFilter::SetVector(idx_t vector_index) {
-	matching_vectors.at(vector_index / 64) |= (1ULL << (vector_index % 64));
+	matching_vectors.set(vector_index);
 }
 
 bool RowGroupFilter::VectorHasRows(idx_t vector_index) const {
-	return (matching_vectors.at(vector_index / 64) >> (vector_index % 64)) & 1ULL;
+	return matching_vectors.test(vector_index);
 }
 
 bool RowGroupFilter::IsEmpty() const {
-	for (const auto &w : matching_vectors) {
-		if (w != 0) {
-			return false;
-		}
-	}
-	return true;
+	return matching_vectors.none();
+}
+
+void RowGroupFilter::SetObserved(idx_t vector_index) {
+	observed.set(vector_index);
+}
+
+void RowGroupFilter::MarkFullyObserved() {
+	observed.set();
+}
+
+bool RowGroupFilter::IsObserved(idx_t vector_index) const {
+	return observed.test(vector_index);
+}
+
+bool RowGroupFilter::IsFullyObserved() const {
+	return observed.all();
 }
 
 void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
-	for (idx_t i = 0; i < BITVECTOR_ARRAY_SIZE; ++i) {
-		matching_vectors[i] |= other.matching_vectors[i];
-	}
+	matching_vectors |= other.matching_vectors;
+	observed |= other.observed;
 }
 
 // ------- CONDITION_CACHE_ENTRY -------
@@ -51,17 +61,10 @@ CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
 	constexpr idx_t vectors_per_row_group = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
 
 	idx_t qualifying_vectors = 0;
-	idx_t qualifying_row_groups = 0;
 	for (const auto &[rg_idx, filter] : bitvectors) {
-		if (!filter.IsEmpty()) {
-			++qualifying_row_groups;
-		}
-		for (idx_t v = 0; v < vectors_per_row_group; ++v) {
-			if (filter.VectorHasRows(v)) {
-				++qualifying_vectors;
-			}
-		}
+		qualifying_vectors += filter.matching_vectors.count();
 	}
+	idx_t cached_row_groups = bitvectors.size();
 
 	idx_t full_row_groups = total_rows / DEFAULT_ROW_GROUP_SIZE;
 	idx_t remaining_rows = total_rows % DEFAULT_ROW_GROUP_SIZE;
@@ -74,7 +77,7 @@ CacheEntryStats ConditionCacheEntry::ComputeStats(idx_t total_rows) const {
 	return CacheEntryStats {
 	    .qualifying_vectors = qualifying_vectors,
 	    .total_vectors = total_vectors,
-	    .qualifying_row_groups = qualifying_row_groups,
+	    .cached_row_groups = cached_row_groups,
 	    .total_row_groups = total_row_groups,
 	};
 }
@@ -107,10 +110,30 @@ void ConditionCacheEntry::MergeFrom(const ConditionCacheEntry &other) {
 	}
 }
 
+void ConditionCacheEntry::MarkAllRowGroupsFullyObserved() {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	for (auto &[rg_idx, filter] : bitvectors) {
+		filter.MarkFullyObserved();
+	}
+}
+
+void ConditionCacheEntry::MarkRowGroupFullyObserved(idx_t rg_idx) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	bitvectors[rg_idx].MarkFullyObserved();
+}
+
+void ConditionCacheEntry::SetObservedVector(idx_t rg_idx, idx_t vec_idx) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	bitvectors[rg_idx].SetObserved(vec_idx);
+}
+
 bool ConditionCacheEntry::VectorPassesFilter(idx_t rg_idx, idx_t vec_idx) const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	auto it = bitvectors.find(rg_idx);
 	if (it == bitvectors.end()) {
+		return true;
+	}
+	if (!it->second.IsObserved(vec_idx)) {
 		return true;
 	}
 	return it->second.VectorHasRows(vec_idx);
@@ -123,8 +146,72 @@ bool ConditionCacheEntry::StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t ma
 		if (it == bitvectors.end() || !it->second.IsEmpty()) {
 			return false;
 		}
+		if (!it->second.IsFullyObserved()) {
+			return false;
+		}
 	}
 	return true;
+}
+
+bool ConditionCacheEntry::NeedsObservation(idx_t total_rows) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
+	for (idx_t rg = 0; rg < total_row_groups; ++rg) {
+		auto it = bitvectors.find(rg);
+		if (it == bitvectors.end()) {
+			return true;
+		}
+		idx_t rows_in_rg = DEFAULT_ROW_GROUP_SIZE;
+		if (rg + 1 == total_row_groups) {
+			rows_in_rg = total_rows - rg * DEFAULT_ROW_GROUP_SIZE;
+			if (rows_in_rg == 0) {
+				rows_in_rg = DEFAULT_ROW_GROUP_SIZE;
+			}
+		}
+		idx_t vectors_in_rg = (rows_in_rg + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+		for (idx_t vec_idx = 0; vec_idx < vectors_in_rg; ++vec_idx) {
+			if (!it->second.IsObserved(vec_idx)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+vector<CacheObservationRange> ConditionCacheEntry::GetUnobservedVectorRanges(idx_t total_rows) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	vector<CacheObservationRange> ranges;
+	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
+
+	auto append_range = [&](idx_t start_row, idx_t count) {
+		if (count == 0) {
+			return;
+		}
+		if (!ranges.empty()) {
+			auto &last = ranges.back();
+			if (last.start_row + last.count == start_row) {
+				last.count += count;
+				return;
+			}
+		}
+		ranges.push_back(CacheObservationRange {.start_row = start_row, .count = count});
+	};
+
+	for (idx_t rg = 0; rg < total_row_groups; ++rg) {
+		idx_t row_group_start = rg * DEFAULT_ROW_GROUP_SIZE;
+		idx_t rows_in_rg = MinValue<idx_t>(DEFAULT_ROW_GROUP_SIZE, total_rows - row_group_start);
+		idx_t vectors_in_rg = (rows_in_rg + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+		auto it = bitvectors.find(rg);
+		for (idx_t vec_idx = 0; vec_idx < vectors_in_rg; ++vec_idx) {
+			if (it != bitvectors.end() && it->second.IsObserved(vec_idx)) {
+				continue;
+			}
+			idx_t vector_start = row_group_start + vec_idx * STANDARD_VECTOR_SIZE;
+			idx_t vector_count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total_rows - vector_start);
+			append_range(vector_start, vector_count);
+		}
+	}
+	return ranges;
 }
 
 idx_t ConditionCacheEntry::RowGroupCount() const {
@@ -135,6 +222,15 @@ idx_t ConditionCacheEntry::RowGroupCount() const {
 bool ConditionCacheEntry::HasRowGroup(idx_t rg_idx) const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return bitvectors.find(rg_idx) != bitvectors.end();
+}
+
+idx_t ConditionCacheEntry::GetObservedVectorCount(idx_t rg_idx) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto it = bitvectors.find(rg_idx);
+	if (it == bitvectors.end()) {
+		return 0;
+	}
+	return static_cast<idx_t>(it->second.observed.count());
 }
 
 bool ConditionCacheEntry::RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const {
@@ -160,6 +256,20 @@ pair<idx_t, bool> ConditionCacheEntry::EraseRowGroups(const unordered_set<idx_t>
 	idx_t removed = 0;
 	for (auto rg_idx : row_group_indices) {
 		removed += bitvectors.erase(rg_idx);
+	}
+	return {removed, bitvectors.empty()};
+}
+
+pair<idx_t, bool> ConditionCacheEntry::EraseRowGroupsStartingAt(idx_t first_row_group) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	idx_t removed = 0;
+	for (auto it = bitvectors.begin(); it != bitvectors.end();) {
+		if (it->first >= first_row_group) {
+			it = bitvectors.erase(it);
+			removed++;
+		} else {
+			++it;
+		}
 	}
 	return {removed, bitvectors.empty()};
 }
@@ -258,6 +368,80 @@ idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t
 	return removed_count;
 }
 
+idx_t ConditionCacheStore::RemoveRowGroupsStartingAtForTable(ClientContext &context, idx_t table_oid,
+                                                             idx_t first_row_group) {
+	auto &cache = ObjectCache::GetObjectCache(context);
+
+	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
+	if (!index) {
+		return 0;
+	}
+
+	auto filter_keys = index->Take();
+	idx_t removed_count = 0;
+
+	for (const auto &filter_key : filter_keys) {
+		CacheKey key {table_oid, filter_key};
+		string cache_key = MakeCacheKeyString(key);
+		auto entry = cache.Get<ConditionCacheEntry>(cache_key);
+		if (!entry) {
+			continue;
+		}
+		auto erased = entry->EraseRowGroupsStartingAt(first_row_group);
+		removed_count += erased.first;
+		if (erased.second) {
+			cache.Delete(cache_key);
+		} else {
+			index->Add(filter_key);
+		}
+	}
+
+	if (index->IsEmpty()) {
+		cache.Delete(MakeFilterKeyIndexKey(table_oid));
+		concurrency::lock_guard<concurrency::mutex> guard(lock);
+		cached_table_oids.erase(table_oid);
+	}
+
+	return removed_count;
+}
+
+idx_t ConditionCacheStore::RemoveRowGroupsStartingAtForTable(DatabaseInstance &db, idx_t table_oid,
+                                                             idx_t first_row_group) {
+	auto &cache = db.GetObjectCache();
+
+	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
+	if (!index) {
+		return 0;
+	}
+
+	auto filter_keys = index->Take();
+	idx_t removed_count = 0;
+
+	for (const auto &filter_key : filter_keys) {
+		CacheKey key {table_oid, filter_key};
+		string cache_key = MakeCacheKeyString(key);
+		auto entry = cache.Get<ConditionCacheEntry>(cache_key);
+		if (!entry) {
+			continue;
+		}
+		auto erased = entry->EraseRowGroupsStartingAt(first_row_group);
+		removed_count += erased.first;
+		if (erased.second) {
+			cache.Delete(cache_key);
+		} else {
+			index->Add(filter_key);
+		}
+	}
+
+	if (index->IsEmpty()) {
+		cache.Delete(MakeFilterKeyIndexKey(table_oid));
+		concurrency::lock_guard<concurrency::mutex> guard(lock);
+		cached_table_oids.erase(table_oid);
+	}
+
+	return removed_count;
+}
+
 bool ConditionCacheStore::HasEntriesForTable(ClientContext &context, idx_t table_oid) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
@@ -286,6 +470,10 @@ void ConditionCacheStore::ClearAll(ClientContext &context) {
 shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(ClientContext &context) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 	return cache.GetOrCreate<ConditionCacheStore>(CACHE_KEY);
+}
+
+shared_ptr<ConditionCacheStore> ConditionCacheStore::GetOrCreate(DatabaseInstance &db) {
+	return db.GetObjectCache().GetOrCreate<ConditionCacheStore>(CACHE_KEY);
 }
 
 void ConditionCacheStore::RecordAccess(bool hit) {

@@ -7,6 +7,7 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
 #include "test_helpers.hpp"
@@ -28,6 +29,19 @@ optional_ptr<LogicalGet> FindLogicalGet(LogicalOperator &op) {
 	return nullptr;
 }
 
+bool ContainsCacheRecorder(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR &&
+	    op.Cast<LogicalExtensionOperator>().GetExtensionName() == "query_condition_cache_recorder") {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ContainsCacheRecorder(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 } // namespace
 
 TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") {
@@ -36,6 +50,7 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 	entry->SetQualifyingVector(/*rg_idx=*/0, /*vec_idx=*/5);
 	entry->EnsureRowGroup(/*rg_idx=*/1);
 	entry->SetQualifyingVector(/*rg_idx=*/2, /*vec_idx=*/10);
+	entry->MarkAllRowGroupsFullyObserved();
 
 	auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
 	CacheExpressionFilter filter(std::move(dummy_expr), entry);
@@ -127,6 +142,63 @@ TEST_CASE("Optimizer injects cache filter into LogicalGet", "[query_condition_ca
 		auto get = FindLogicalGet(*plan);
 		REQUIRE(get);
 		REQUIRE(get->table_filters.filters.find(COLUMN_IDENTIFIER_ROW_ID) == get->table_filters.filters.end());
+	}
+}
+
+TEST_CASE("Recorder backfill completes vectors skipped by pushdown", "[query_condition_cache]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	REQUIRE_NO_FAIL(con.Query("LOAD query_condition_cache"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i)"));
+
+	REQUIRE_NO_FAIL(con.Query("SELECT count(*) FROM t WHERE id < 3000"));
+
+	auto plan = con.ExtractPlan("SELECT count(*) FROM t WHERE id < 3000");
+	REQUIRE(plan != nullptr);
+	REQUIRE_FALSE(ContainsCacheRecorder(*plan));
+}
+
+TEST_CASE("CacheExpressionFilter - observed-bit gating", "[query_condition_cache]") {
+	SECTION("empty row group with no observed bits: no pruning") {
+		auto entry = make_shared_ptr<ConditionCacheEntry>();
+		entry->EnsureRowGroup(/*rg_idx=*/1);
+
+		auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
+		CacheExpressionFilter filter(std::move(dummy_expr), entry);
+
+		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		NumericStats::SetMin(stats, Value::BIGINT(122880));
+		NumericStats::SetMax(stats, Value::BIGINT(200000));
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
+	}
+
+	SECTION("empty row group becomes prunable once marked fully observed") {
+		auto entry = make_shared_ptr<ConditionCacheEntry>();
+		entry->EnsureRowGroup(/*rg_idx=*/1);
+		entry->MarkAllRowGroupsFullyObserved();
+
+		auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
+		CacheExpressionFilter filter(std::move(dummy_expr), entry);
+
+		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		NumericStats::SetMin(stats, Value::BIGINT(122880));
+		NumericStats::SetMax(stats, Value::BIGINT(200000));
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::FILTER_ALWAYS_FALSE);
+	}
+
+	SECTION("range with one fully-observed empty rg and one absent rg: no pruning") {
+		auto entry = make_shared_ptr<ConditionCacheEntry>();
+		entry->EnsureRowGroup(/*rg_idx=*/1);
+		entry->MarkAllRowGroupsFullyObserved();
+
+		auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
+		CacheExpressionFilter filter(std::move(dummy_expr), entry);
+
+		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		NumericStats::SetMin(stats, Value::BIGINT(122880));
+		NumericStats::SetMax(stats, Value::BIGINT(300000));
+		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
 	}
 }
 } // namespace duckdb
