@@ -1,6 +1,7 @@
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
@@ -10,12 +11,21 @@ namespace duckdb {
 
 RowGroupFilter::RowGroupFilter(const vector<idx_t> &qualifying_vectors) {
 	for (const auto &vec_idx : qualifying_vectors) {
-		matching_vectors.at(vec_idx / 64) |= (1ULL << (vec_idx % 64));
+		SetVector(vec_idx);
 	}
 }
 
+void RowGroupFilter::SetObserved(idx_t vector_index) {
+	observed_vectors.at(vector_index / 64) |= (1ULL << (vector_index % 64));
+}
+
 void RowGroupFilter::SetVector(idx_t vector_index) {
+	SetObserved(vector_index);
 	matching_vectors.at(vector_index / 64) |= (1ULL << (vector_index % 64));
+}
+
+bool RowGroupFilter::VectorIsObserved(idx_t vector_index) const {
+	return (observed_vectors.at(vector_index / 64) >> (vector_index % 64)) & 1ULL;
 }
 
 bool RowGroupFilter::VectorHasRows(idx_t vector_index) const {
@@ -31,8 +41,27 @@ bool RowGroupFilter::IsEmpty() const {
 	return true;
 }
 
+bool RowGroupFilter::HasObservedVectors() const {
+	for (const auto &w : observed_vectors) {
+		if (w != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool RowGroupFilter::AllVectorsObserved(idx_t vector_count) const {
+	for (idx_t vec_idx = 0; vec_idx < vector_count; ++vec_idx) {
+		if (!VectorIsObserved(vec_idx)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 void RowGroupFilter::MergeFrom(const RowGroupFilter &other) {
 	for (idx_t i = 0; i < BITVECTOR_ARRAY_SIZE; ++i) {
+		observed_vectors[i] |= other.observed_vectors[i];
 		matching_vectors[i] |= other.matching_vectors[i];
 	}
 }
@@ -89,21 +118,58 @@ void ConditionCacheEntry::SetQualifyingVector(idx_t rg_idx, idx_t vec_idx) {
 	bitvectors[rg_idx].SetVector(vec_idx);
 }
 
+void ConditionCacheEntry::SetObservedVector(idx_t rg_idx, idx_t vec_idx) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	bitvectors[rg_idx].SetObserved(vec_idx);
+}
+
+void ConditionCacheEntry::RecordVector(idx_t rg_idx, idx_t vec_idx, bool has_match) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto &filter = bitvectors[rg_idx];
+	if (has_match) {
+		filter.SetVector(vec_idx);
+	} else {
+		filter.SetObserved(vec_idx);
+	}
+}
+
+void ConditionCacheEntry::RecordVector(idx_t rg_idx, idx_t vec_idx, bool has_match, idx_t max_row_id) {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto &filter = bitvectors[rg_idx];
+	if (has_match) {
+		filter.SetVector(vec_idx);
+	} else {
+		filter.SetObserved(vec_idx);
+	}
+	if (!has_max_observed_row_id || max_row_id > max_observed_row_id) {
+		has_max_observed_row_id = true;
+		max_observed_row_id = max_row_id;
+	}
+}
+
 void ConditionCacheEntry::MergeFrom(const ConditionCacheEntry &other) {
 	if (this == &other) {
 		return;
 	}
 	vector<pair<idx_t, RowGroupFilter>> snapshot;
+	bool other_has_max_observed_row_id;
+	idx_t other_max_observed_row_id;
 	{
 		concurrency::lock_guard<concurrency::mutex> guard(other.lock);
 		snapshot.reserve(other.bitvectors.size());
 		for (const auto &kv : other.bitvectors) {
 			snapshot.push_back(kv);
 		}
+		other_has_max_observed_row_id = other.has_max_observed_row_id;
+		other_max_observed_row_id = other.max_observed_row_id;
 	}
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	for (const auto &[rg_idx, filter] : snapshot) {
 		bitvectors[rg_idx].MergeFrom(filter);
+	}
+	if (other_has_max_observed_row_id && (!has_max_observed_row_id || other_max_observed_row_id > max_observed_row_id)) {
+		has_max_observed_row_id = true;
+		max_observed_row_id = other_max_observed_row_id;
 	}
 }
 
@@ -113,6 +179,32 @@ bool ConditionCacheEntry::VectorPassesFilter(idx_t rg_idx, idx_t vec_idx) const 
 	if (it == bitvectors.end()) {
 		return true;
 	}
+	if (!it->second.VectorIsObserved(vec_idx)) {
+		return true;
+	}
+	return it->second.VectorHasRows(vec_idx);
+}
+
+bool ConditionCacheEntry::RowIdPassesFilter(row_t row_id) const {
+	if (row_id < 0 || row_id >= MAX_ROW_ID) {
+		return true;
+	}
+
+	auto row_id_idx = NumericCast<idx_t>(row_id);
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	if (!has_max_observed_row_id || row_id_idx > max_observed_row_id) {
+		return true;
+	}
+
+	idx_t rg_idx = row_id_idx / DEFAULT_ROW_GROUP_SIZE;
+	idx_t vec_idx = (row_id_idx % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+	auto it = bitvectors.find(rg_idx);
+	if (it == bitvectors.end()) {
+		return true;
+	}
+	if (!it->second.VectorIsObserved(vec_idx)) {
+		return true;
+	}
 	return it->second.VectorHasRows(vec_idx);
 }
 
@@ -120,7 +212,7 @@ bool ConditionCacheEntry::StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t ma
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	for (idx_t rg = min_rg; rg <= max_rg; ++rg) {
 		auto it = bitvectors.find(rg);
-		if (it == bitvectors.end() || !it->second.IsEmpty()) {
+		if (it == bitvectors.end() || !it->second.AllVectorsObserved(VECTORS_PER_ROW_GROUP) || !it->second.IsEmpty()) {
 			return false;
 		}
 	}
@@ -135,6 +227,15 @@ idx_t ConditionCacheEntry::RowGroupCount() const {
 bool ConditionCacheEntry::HasRowGroup(idx_t rg_idx) const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return bitvectors.find(rg_idx) != bitvectors.end();
+}
+
+bool ConditionCacheEntry::RowGroupVectorIsObserved(idx_t rg_idx, idx_t vec_idx) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	auto it = bitvectors.find(rg_idx);
+	if (it == bitvectors.end()) {
+		return false;
+	}
+	return it->second.VectorIsObserved(vec_idx);
 }
 
 bool ConditionCacheEntry::RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const {
@@ -152,7 +253,7 @@ bool ConditionCacheEntry::RowGroupIsCompletelyEmpty(idx_t rg_idx) const {
 	if (it == bitvectors.end()) {
 		return false;
 	}
-	return it->second.IsEmpty();
+	return it->second.HasObservedVectors() && it->second.IsEmpty();
 }
 
 pair<idx_t, bool> ConditionCacheEntry::EraseRowGroups(const unordered_set<idx_t> &row_group_indices) {

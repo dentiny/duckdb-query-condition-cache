@@ -34,7 +34,9 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
 	entry->SetQualifyingVector(/*rg_idx=*/0, /*vec_idx=*/0);
 	entry->SetQualifyingVector(/*rg_idx=*/0, /*vec_idx=*/5);
-	entry->EnsureRowGroup(/*rg_idx=*/1);
+	for (idx_t vec_idx = 0; vec_idx < VECTORS_PER_ROW_GROUP; ++vec_idx) {
+		entry->SetObservedVector(/*rg_idx=*/1, vec_idx);
+	}
 	entry->SetQualifyingVector(/*rg_idx=*/2, /*vec_idx=*/10);
 
 	auto dummy_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
@@ -59,6 +61,18 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 		NumericStats::SetMin(stats, Value::BIGINT(245760));
 		NumericStats::SetMax(stats, Value::BIGINT(300000));
 		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
+	}
+
+	SECTION("partial observed-empty row group: no pruning") {
+		auto partial_entry = make_shared_ptr<ConditionCacheEntry>();
+		partial_entry->SetObservedVector(/*rg_idx=*/3, /*vec_idx=*/0);
+		auto partial_expr = make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0);
+		CacheExpressionFilter partial_filter(std::move(partial_expr), partial_entry);
+
+		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
+		NumericStats::SetMin(stats, Value::BIGINT(368640));
+		NumericStats::SetMax(stats, Value::BIGINT(400000));
+		REQUIRE(partial_filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
 	}
 
 	SECTION("stats without min/max: no pruning") {

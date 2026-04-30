@@ -312,3 +312,35 @@ query I
 SELECT count(*) FROM t_drop WHERE flag = 1;
 ----
 1
+
+# Nested column predicates are intentionally skipped by the automatic optimizer
+# path. DuckDB has specialized nested-column scan/pushdown behavior; the fused
+# recorder must not replace it.
+
+statement ok
+CREATE TABLE t_struct AS
+  SELECT i AS id, {'i': i, 'j': i::VARCHAR} AS c
+  FROM range(1000) t(i);
+
+query I
+SELECT sum(c['i']) FROM t_struct WHERE c['i'] >= 0;
+----
+499500
+
+query IIII
+SELECT * FROM condition_cache_info('t_struct', "c['i'] >= 0");
+----
+0	0	0	0
+
+statement ok
+UPDATE t_struct SET c = {'i': NULL, 'j': c['j']} WHERE c['i'] % 4 = 0;
+
+query I
+SELECT sum(c['i']) FROM t_struct WHERE c['i'] >= 0;
+----
+375000
+
+query IIII
+SELECT * FROM condition_cache_info('t_struct', "c['i'] >= 0");
+----
+0	0	0	0

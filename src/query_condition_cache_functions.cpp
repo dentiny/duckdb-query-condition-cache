@@ -132,31 +132,54 @@ public:
 				rowid_vec.ToUnifiedFormat(chunk.size(), rowid_data);
 				auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
 
-				// Determine row group from first row_id and instantiate its entry
-				// so that fully excluded row groups are recorded with empty bitvectors.
-				auto first_rowid_idx = rowid_data.sel->get_index(0);
-				if (!rowid_data.validity.RowIsValid(first_rowid_idx)) {
+				unordered_map<idx_t, idx_t> observed_max_row_ids;
+				observed_max_row_ids.reserve(1);
+				for (idx_t row_idx = 0; row_idx < chunk.size(); ++row_idx) {
+					auto rowid_entry = rowid_data.sel->get_index(row_idx);
+					if (!rowid_data.validity.RowIsValid(rowid_entry)) {
+						continue;
+					}
+					auto row_id = rowids[rowid_entry];
+					if (row_id < 0 || row_id >= MAX_ROW_ID) {
+						continue;
+					}
+					auto row_id_idx = NumericCast<idx_t>(row_id);
+					idx_t row_group_idx = row_id_idx / DEFAULT_ROW_GROUP_SIZE;
+					idx_t vector_idx = (row_id_idx % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+					idx_t key = row_group_idx * VECTORS_PER_ROW_GROUP + vector_idx;
+					auto it = observed_max_row_ids.find(key);
+					if (it == observed_max_row_ids.end() || row_id_idx > it->second) {
+						observed_max_row_ids[key] = row_id_idx;
+					}
+				}
+				if (observed_max_row_ids.empty()) {
 					continue;
 				}
-				auto first_row_id = NumericCast<idx_t>(rowids[first_rowid_idx]);
-				if (first_row_id >= NumericCast<idx_t>(MAX_ROW_ID)) {
-					continue; // skip transaction-local storage rows
-				}
-				idx_t row_group_idx = first_row_id / DEFAULT_ROW_GROUP_SIZE;
-				local_entry.EnsureRowGroup(row_group_idx);
 
 				SelectionVector sel(chunk.size());
 				idx_t match_count = expr_executor.SelectExpression(chunk, sel);
 
+				unordered_set<idx_t> matching_keys;
+				matching_keys.reserve(1);
 				for (idx_t idx = 0; idx < match_count; ++idx) {
 					auto rowid_entry = rowid_data.sel->get_index(sel.get_index(idx));
 					if (!rowid_data.validity.RowIsValid(rowid_entry)) {
 						continue;
 					}
-					auto row_id = NumericCast<idx_t>(rowids[rowid_entry]);
-					idx_t rg_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
-					idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-					local_entry.SetQualifyingVector(/*rg_idx=*/rg_idx, /*vec_idx=*/vector_idx);
+					auto row_id = rowids[rowid_entry];
+					if (row_id < 0 || row_id >= MAX_ROW_ID) {
+						continue;
+					}
+					auto row_id_idx = NumericCast<idx_t>(row_id);
+					idx_t rg_idx = row_id_idx / DEFAULT_ROW_GROUP_SIZE;
+					idx_t vector_idx = (row_id_idx % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+					matching_keys.insert(rg_idx * VECTORS_PER_ROW_GROUP + vector_idx);
+				}
+
+				for (const auto &[key, max_row_id] : observed_max_row_ids) {
+					idx_t row_group_idx = key / VECTORS_PER_ROW_GROUP;
+					idx_t vector_idx = key % VECTORS_PER_ROW_GROUP;
+					local_entry.RecordVector(row_group_idx, vector_idx, matching_keys.count(key) > 0, max_row_id);
 				}
 			}
 		}

@@ -54,7 +54,9 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 		REQUIRE(entry->RowGroupCount() == 5);
 		REQUIRE(entry->RowGroupVectorHasQualifyingRows(0, 0));
 		REQUIRE(entry->RowGroupVectorHasQualifyingRows(0, 1));
+		REQUIRE(entry->RowGroupVectorIsObserved(0, 2));
 		REQUIRE_FALSE(entry->RowGroupVectorHasQualifyingRows(0, 2));
+		REQUIRE_FALSE(entry->VectorPassesFilter(0, 2));
 		REQUIRE(entry->RowGroupIsCompletelyEmpty(1));
 	}
 
@@ -88,8 +90,11 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 
 		REQUIRE(entry != nullptr);
 		REQUIRE(entry->RowGroupCount() == 5);
+		REQUIRE(entry->RowGroupVectorIsObserved(0, 0));
 		REQUIRE(entry->RowGroupIsCompletelyEmpty(0));
 		REQUIRE(entry->RowGroupIsCompletelyEmpty(4));
+		REQUIRE_FALSE(entry->VectorPassesFilter(0, 0));
 	}
 }
+
 } // namespace duckdb

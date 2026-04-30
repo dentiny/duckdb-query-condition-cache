@@ -52,13 +52,59 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	auto row_ids = UnifiedVectorFormat::GetData<int64_t>(vdata);
 
 	auto first_idx = vdata.sel->get_index(0);
-	int64_t first_row_id = row_ids[first_idx];
+	bool first_valid = vdata.validity.RowIsValid(first_idx);
+	row_t first_row_id = first_valid ? row_ids[first_idx] : -1;
+	bool first_passes = first_valid ? entry->RowIdPassesFilter(first_row_id) : true;
+	idx_t rg_idx = 0;
+	idx_t vec_idx = 0;
+	if (first_valid && first_row_id >= 0 && first_row_id < MAX_ROW_ID) {
+		auto first_row_id_idx = NumericCast<idx_t>(first_row_id);
+		rg_idx = first_row_id_idx / DEFAULT_ROW_GROUP_SIZE;
+		vec_idx = (first_row_id_idx % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+	}
 
-	idx_t rg_idx = NumericCast<idx_t>(first_row_id) / DEFAULT_ROW_GROUP_SIZE;
-	idx_t vec_idx = (NumericCast<idx_t>(first_row_id) % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
-	bool passes = entry->VectorPassesFilter(rg_idx, vec_idx);
+	bool same_pass_result = true;
+	bool same_storage_vector = true;
+	for (idx_t i = 1; i < args.size(); ++i) {
+		auto row_idx = vdata.sel->get_index(i);
+		if (!vdata.validity.RowIsValid(row_idx)) {
+			same_storage_vector = false;
+			if (!first_passes) {
+				same_pass_result = false;
+			}
+			break;
+		}
+		auto row_id = row_ids[row_idx];
+		if (entry->RowIdPassesFilter(row_id) != first_passes) {
+			same_pass_result = false;
+		}
+		if (row_id < 0 || row_id >= MAX_ROW_ID) {
+			same_storage_vector = false;
+			continue;
+		}
+		auto row_id_idx = NumericCast<idx_t>(row_id);
+		if (!first_valid || first_row_id < 0 || first_row_id >= MAX_ROW_ID || row_id_idx / DEFAULT_ROW_GROUP_SIZE != rg_idx ||
+		    (row_id_idx % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE != vec_idx) {
+			same_storage_vector = false;
+		}
+	}
 
-	result.Reference(Value::BOOLEAN(passes));
+	if (same_storage_vector && same_pass_result) {
+		result.Reference(Value::BOOLEAN(first_passes));
+		return;
+	}
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto output = FlatVector::GetData<bool>(result);
+	for (idx_t i = 0; i < args.size(); ++i) {
+		auto row_idx = vdata.sel->get_index(i);
+		if (!vdata.validity.RowIsValid(row_idx)) {
+			output[i] = true;
+			continue;
+		}
+		auto row_id = row_ids[row_idx];
+		output[i] = entry->RowIdPassesFilter(row_id);
+	}
 }
 
 CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, shared_ptr<ConditionCacheEntry> entry)

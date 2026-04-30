@@ -19,10 +19,15 @@ inline constexpr idx_t BITVECTOR_ARRAY_SIZE = (VECTORS_PER_ROW_GROUP + 63) / 64;
 static_assert(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE == 0,
               "DEFAULT_ROW_GROUP_SIZE must be divisible by STANDARD_VECTOR_SIZE");
 
-// Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row,
-// for 0 <= i < VECTORS_PER_ROW_GROUP.
+// Per row-group bitvectors, for 0 <= i < VECTORS_PER_ROW_GROUP:
+// - observed_vectors[i] = the vector was scanned for this predicate
+// - matching_vectors[i] = the vector has at least one qualifying row
+//
+// A zero matching bit is only meaningful when the observed bit is set. This
+// lets partial entries backfill safely: unobserved vectors must still pass.
 // Backed by array<uint64_t, N> to support configurable row group / vector sizes.
 struct RowGroupFilter {
+	array<uint64_t, BITVECTOR_ARRAY_SIZE> observed_vectors = {};
 	array<uint64_t, BITVECTOR_ARRAY_SIZE> matching_vectors = {};
 
 	RowGroupFilter() = default;
@@ -31,9 +36,13 @@ struct RowGroupFilter {
 	// Each index must be in [0, VECTORS_PER_ROW_GROUP). Duplicates are allowed.
 	explicit RowGroupFilter(const vector<idx_t> &qualifying_vectors);
 
+	void SetObserved(idx_t vector_index);
 	void SetVector(idx_t vector_index);
+	bool VectorIsObserved(idx_t vector_index) const;
 	bool VectorHasRows(idx_t vector_index) const;
 	bool IsEmpty() const;
+	bool HasObservedVectors() const;
+	bool AllVectorsObserved(idx_t vector_count) const;
 	void MergeFrom(const RowGroupFilter &other);
 };
 
@@ -80,20 +89,27 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 
 	// Ensure a row group key exists (empty filter). Used when recording fully excluded row groups.
 	void EnsureRowGroup(idx_t rg_idx);
+	// Mark that vector `vec_idx` within row group `rg_idx` was scanned for this predicate.
+	void SetObservedVector(idx_t rg_idx, idx_t vec_idx);
 	// Mark that vector `vec_idx` within row group `rg_idx` has at least one qualifying row.
 	void SetQualifyingVector(idx_t rg_idx, idx_t vec_idx);
+	// Mark one scanned vector and optionally mark it as containing qualifying rows.
+	void RecordVector(idx_t rg_idx, idx_t vec_idx, bool has_match);
+	void RecordVector(idx_t rg_idx, idx_t vec_idx, bool has_match, idx_t max_row_id);
 	// Merge another entry's row-group filters into this entry (e.g. after parallel build).
 	void MergeFrom(const ConditionCacheEntry &other);
 
-	// Row group absent from cache, or vector has qualifying rows -> predicate may pass rows (matches scan semantics).
+	// Unknown/unobserved vectors pass. Observed-empty vectors are skipped.
 	bool VectorPassesFilter(idx_t rg_idx, idx_t vec_idx) const;
-	// True iff every row group in [min_rg, max_rg] is present in the cache and has an empty filter.
+	bool RowIdPassesFilter(row_t row_id) const;
+	// True iff every row group in [min_rg, max_rg] is present, fully observed, and empty.
 	bool StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t max_rg) const;
 
 	idx_t RowGroupCount() const;
 	bool HasRowGroup(idx_t rg_idx) const;
+	bool RowGroupVectorIsObserved(idx_t rg_idx, idx_t vec_idx) const;
 	bool RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const;
-	// True iff `rg_idx` is cached and its filter is empty (no qualifying vectors).
+	// True iff `rg_idx` is cached, has observed vectors, and has no qualifying vectors.
 	bool RowGroupIsCompletelyEmpty(idx_t rg_idx) const;
 
 	// Erase row group keys; returns (number of keys removed, whether the map is now empty).
@@ -102,6 +118,8 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 private:
 	mutable concurrency::mutex lock;
 	unordered_map<idx_t, RowGroupFilter> bitvectors DUCKDB_GUARDED_BY(lock); // rg_idx -> bitvector
+	bool has_max_observed_row_id DUCKDB_GUARDED_BY(lock) = false;
+	idx_t max_observed_row_id DUCKDB_GUARDED_BY(lock) = 0;
 };
 
 // Per-table index stored in ObjectCache (non-evictable). Tracks which

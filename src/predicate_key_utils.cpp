@@ -77,6 +77,21 @@ void NormalizeExpressionForCacheKey(Expression &expr) {
 
 namespace {
 
+void StripFoldableCasts(unique_ptr<Expression> &expr) {
+	ExpressionIterator::EnumerateChildren(*expr, [](unique_ptr<Expression> &child) { StripFoldableCasts(child); });
+	if (expr->GetExpressionClass() != ExpressionClass::BOUND_CAST) {
+		return;
+	}
+
+	auto &cast = expr->Cast<BoundCastExpression>();
+	if (cast.try_cast || !cast.child->IsFoldable() ||
+	    !BoundCastExpression::CastIsInvertible(cast.source_type(), cast.return_type)) {
+		return;
+	}
+	expr = std::move(cast.child);
+	StripFoldableCasts(expr);
+}
+
 // Fill BoundReferenceExpression aliases with column names so ToString prints
 // "val" instead of "#1", matching the plan binder output.
 void SetReferenceAliases(Expression &expr, DuckTableEntry &table_entry) {
@@ -120,6 +135,7 @@ string ComputeCanonicalPredicateKey(ClientContext &context, DuckTableEntry &tabl
 		}
 	}
 	SetReferenceAliases(*bound_expr, table_entry);
+	StripFoldableCasts(bound_expr);
 	NormalizeExpressionForCacheKey(*bound_expr);
 	return bound_expr->ToString();
 }
@@ -135,6 +151,7 @@ string ComputeCanonicalPredicateKey(const vector<unique_ptr<Expression>> &expres
 		cloned.push_back(expr->Copy());
 	}
 	auto combined = CombineWithAnd(std::move(cloned));
+	StripFoldableCasts(combined);
 	NormalizeExpressionForCacheKey(*combined);
 	return combined->ToString();
 }
