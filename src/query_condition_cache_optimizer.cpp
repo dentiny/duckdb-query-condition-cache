@@ -125,6 +125,7 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(context, key);
+	store->RecordAccess(entry != nullptr);
 
 	bool should_inject_recorder = false;
 	if (!entry) {
