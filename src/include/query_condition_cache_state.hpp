@@ -4,7 +4,8 @@
 #include "concurrency/annotated_mutex.hpp"
 #include "concurrency/thread_annotation.hpp"
 
-#include "duckdb/common/array.hpp"
+#include <bitset>
+
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -14,25 +15,28 @@ namespace duckdb {
 
 // Derived from DuckDB's compile-time configurable constants
 inline constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
-inline constexpr idx_t BITVECTOR_ARRAY_SIZE = (VECTORS_PER_ROW_GROUP + 63) / 64;
 static_assert(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE == 0,
               "DEFAULT_ROW_GROUP_SIZE must be divisible by STANDARD_VECTOR_SIZE");
 
-// Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row,
-// for 0 <= i < VECTORS_PER_ROW_GROUP.
-// Backed by array<uint64_t, N> to support configurable row group / vector sizes.
+// Per row-group pair of bitsets:
+//   matching_vectors[i] = 1 iff vec i has at least one qualifying row.
+//   observed[i]         = 1 iff vec i has been observed by an exact scan path.
 struct RowGroupFilter {
-	array<uint64_t, BITVECTOR_ARRAY_SIZE> matching_vectors = {};
+	std::bitset<VECTORS_PER_ROW_GROUP> matching_vectors;
+	std::bitset<VECTORS_PER_ROW_GROUP> observed;
 
 	RowGroupFilter() = default;
 
-	// Construct from vector indices that contain at least one qualifying row.
-	// Each index must be in [0, VECTORS_PER_ROW_GROUP). Duplicates are allowed.
+	// Leaves observed all-zero; call SetObserved explicitly when a vec was scanned.
 	explicit RowGroupFilter(const vector<idx_t> &qualifying_vectors);
 
 	void SetVector(idx_t vector_index);
 	bool VectorHasRows(idx_t vector_index) const;
 	bool IsEmpty() const;
+	void SetObserved(idx_t vector_index);
+	void MarkFullyObserved();
+	bool IsObserved(idx_t vector_index) const;
+	bool IsFullyObserved() const;
 	void MergeFrom(const RowGroupFilter &other);
 };
 
@@ -55,8 +59,13 @@ struct CacheKeyHashFunction {
 struct CacheEntryStats {
 	idx_t qualifying_vectors;
 	idx_t total_vectors;
-	idx_t qualifying_row_groups;
+	idx_t cached_row_groups;
 	idx_t total_row_groups;
+};
+
+struct CacheObservationRange {
+	idx_t start_row;
+	idx_t count;
 };
 
 // A single cache entry: the bitvectors for one (table, predicate) combination.
@@ -72,7 +81,7 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	// Return estimated memory usage for LRU eviction
 	optional_idx GetEstimatedCacheMemory() const override;
 
-	// Compute statistics about qualifying vectors and row groups
+	// Compute statistics about qualifying vectors and cached row groups
 	CacheEntryStats ComputeStats(idx_t total_rows) const;
 
 	// --- Thread-safe API (each method acquires `lock` internally) ---
@@ -83,20 +92,30 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	void SetQualifyingVector(idx_t rg_idx, idx_t vec_idx);
 	// Merge another entry's row-group filters into this entry (e.g. after parallel build).
 	void MergeFrom(const ConditionCacheEntry &other);
+	// Used by full-table builds to declare every row group fully observed.
+	void MarkAllRowGroupsFullyObserved();
+	void MarkRowGroupFullyObserved(idx_t rg_idx);
+	// Mark that a specific vector was observed by an exact scan path.
+	void SetObservedVector(idx_t rg_idx, idx_t vec_idx);
 
-	// Row group absent from cache, or vector has qualifying rows -> predicate may pass rows (matches scan semantics).
+	// Row group absent from cache, or vector not observed yet, or vector has qualifying rows -> pass rows through.
 	bool VectorPassesFilter(idx_t rg_idx, idx_t vec_idx) const;
-	// True iff every row group in [min_rg, max_rg] is present in the cache and has an empty filter.
+	// True iff every row group in [min_rg, max_rg] is present in the cache, empty, and fully observed.
 	bool StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t max_rg) const;
+	// True iff some row group/vector covering [0, total_rows) is absent or not fully observed.
+	bool NeedsObservation(idx_t total_rows) const;
+	vector<CacheObservationRange> GetUnobservedVectorRanges(idx_t total_rows) const;
 
 	idx_t RowGroupCount() const;
 	bool HasRowGroup(idx_t rg_idx) const;
+	idx_t GetObservedVectorCount(idx_t rg_idx) const;
 	bool RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const;
 	// True iff `rg_idx` is cached and its filter is empty (no qualifying vectors).
 	bool RowGroupIsCompletelyEmpty(idx_t rg_idx) const;
 
 	// Erase row group keys; returns (number of keys removed, whether the map is now empty).
 	pair<idx_t, bool> EraseRowGroups(const unordered_set<idx_t> &row_group_indices);
+	pair<idx_t, bool> EraseRowGroupsStartingAt(idx_t first_row_group);
 
 private:
 	mutable concurrency::mutex lock;
@@ -159,6 +178,8 @@ public:
 	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
 	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
 	                              const unordered_set<idx_t> &row_group_indices);
+	idx_t RemoveRowGroupsStartingAtForTable(ClientContext &context, idx_t table_oid, idx_t first_row_group);
+	idx_t RemoveRowGroupsStartingAtForTable(DatabaseInstance &db, idx_t table_oid, idx_t first_row_group);
 
 	// Check if any entries exist for a given table OID
 	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
@@ -168,6 +189,7 @@ public:
 
 	// Get or create the store from a client context
 	static shared_ptr<ConditionCacheStore> GetOrCreate(ClientContext &context);
+	static shared_ptr<ConditionCacheStore> GetOrCreate(DatabaseInstance &db);
 
 private:
 	concurrency::mutex lock;

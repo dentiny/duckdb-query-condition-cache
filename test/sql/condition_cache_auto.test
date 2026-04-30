@@ -24,7 +24,7 @@ SELECT count(*) FROM t WHERE id < 3000;
 query IIII
 SELECT * FROM condition_cache_info('t', 'id < 3000');
 ----
-1	5	2	245
+5	5	2	245
 
 # Disable setting, new predicates should not be cached
 statement ok

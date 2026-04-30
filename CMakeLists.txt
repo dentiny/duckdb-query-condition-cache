@@ -21,7 +21,9 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/cache_invalidation_optimizer.cpp
+    src/logical_cache_recorder.cpp
     src/logical_cache_invalidator.cpp
+    src/physical_cache_recorder.cpp
     src/physical_cache_invalidator.cpp
     src/predicate_key_utils.cpp
     src/query_condition_cache_extension.cpp

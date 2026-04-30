@@ -97,6 +97,18 @@ struct ScanColumn {
 	LogicalType type;
 };
 
+void MarkObservedRows(ConditionCacheEntry &entry, idx_t start_row, idx_t count) {
+	idx_t row = start_row;
+	idx_t end = start_row + count;
+	while (row < end) {
+		idx_t rg_idx = row / DEFAULT_ROW_GROUP_SIZE;
+		idx_t vec_idx = (row % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+		entry.SetObservedVector(rg_idx, vec_idx);
+		idx_t next_vector = (rg_idx * DEFAULT_ROW_GROUP_SIZE) + ((vec_idx + 1) * STANDARD_VECTOR_SIZE);
+		row = MinValue<idx_t>(next_vector, end);
+	}
+}
+
 // Task that scans a subset of row groups in parallel and builds a local ConditionCacheEntry.
 class CacheBuildTask : public BaseExecutorTask {
 public:
@@ -254,6 +266,49 @@ shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTabl
 
 	auto entry = make_shared_ptr<ConditionCacheEntry>();
 	MergeLocalCacheEntries(local_entries, entry);
+	entry->MarkAllRowGroupsFullyObserved();
+
+	return entry;
+}
+
+shared_ptr<ConditionCacheEntry> BuildCacheEntryForRanges(ClientContext &context, DuckTableEntry &table_entry,
+                                                         Expression &bound_expr,
+                                                         const vector<CacheObservationRange> &ranges) {
+	auto entry = make_shared_ptr<ConditionCacheEntry>();
+	if (ranges.empty()) {
+		return entry;
+	}
+
+	auto &storage = table_entry.GetStorage();
+	auto &columns = table_entry.GetColumns();
+
+	unordered_map<column_t, idx_t> storage_to_scan_idx;
+	idx_t scan_pos = 0;
+	for (const auto &col : columns.Physical()) {
+		storage_to_scan_idx[col.Oid()] = scan_pos++;
+	}
+
+	RemapColumnIndices(bound_expr, storage_to_scan_idx);
+
+	auto &transaction = DuckTransaction::Get(context, table_entry.ParentCatalog().GetAttached());
+	ExpressionExecutor expr_executor(context, bound_expr);
+
+	for (const auto &range : ranges) {
+		idx_t current_row = range.start_row;
+		storage.ScanTableSegment(transaction, range.start_row, range.count, [&](DataChunk &chunk) {
+			MarkObservedRows(*entry, current_row, chunk.size());
+
+			SelectionVector sel(chunk.size());
+			idx_t match_count = expr_executor.SelectExpression(chunk, sel);
+			for (idx_t idx = 0; idx < match_count; ++idx) {
+				idx_t row_id = current_row + sel.get_index(idx);
+				idx_t rg_idx = row_id / DEFAULT_ROW_GROUP_SIZE;
+				idx_t vector_idx = (row_id % DEFAULT_ROW_GROUP_SIZE) / STANDARD_VECTOR_SIZE;
+				entry->SetQualifyingVector(/*rg_idx=*/rg_idx, /*vec_idx=*/vector_idx);
+			}
+			current_row += chunk.size();
+		});
+	}
 
 	return entry;
 }
@@ -290,7 +345,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	output.SetCardinality(1);
 	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
 	                                              stats.qualifying_vectors, stats.total_vectors,
-	                                              stats.qualifying_row_groups, stats.total_row_groups));
+	                                              stats.cached_row_groups, stats.total_row_groups));
 }
 
 TableFunction ConditionCacheBuildFunction() {
@@ -361,7 +416,7 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 	output.SetCardinality(1);
 	if (entry) {
 		auto stats = entry->ComputeStats(bind_data.total_rows);
-		output.data[0].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_row_groups)));
+		output.data[0].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.cached_row_groups)));
 		output.data[1].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_row_groups)));
 		output.data[2].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_vectors)));
 		output.data[3].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_vectors)));
