@@ -105,4 +105,32 @@ TEST_CASE("ConditionCacheEntry - row id filter respects persistent high watermar
 	REQUIRE(entry.RowIdPassesFilter(-1));
 }
 
+TEST_CASE("ConditionCacheEntry - unobserved vector ranges coalesce by persistent row range", "[bitvector]") {
+	ConditionCacheEntry entry;
+	idx_t total_rows = STANDARD_VECTOR_SIZE * 4 + 17;
+
+	REQUIRE(entry.NeedsObservation(total_rows));
+	auto ranges = entry.GetUnobservedVectorRanges(total_rows);
+	REQUIRE(ranges.size() == 1);
+	REQUIRE(ranges[0].start_row == 0);
+	REQUIRE(ranges[0].count == total_rows);
+
+	entry.RecordVector(/*rg_idx=*/0, /*vec_idx=*/0, /*has_match=*/false, /*max_row_id=*/STANDARD_VECTOR_SIZE - 1);
+	entry.RecordVector(/*rg_idx=*/0, /*vec_idx=*/2, /*has_match=*/true, /*max_row_id=*/STANDARD_VECTOR_SIZE * 3 - 1);
+
+	ranges = entry.GetUnobservedVectorRanges(total_rows);
+	REQUIRE(ranges.size() == 2);
+	REQUIRE(ranges[0].start_row == STANDARD_VECTOR_SIZE);
+	REQUIRE(ranges[0].count == STANDARD_VECTOR_SIZE);
+	REQUIRE(ranges[1].start_row == STANDARD_VECTOR_SIZE * 3);
+	REQUIRE(ranges[1].count == STANDARD_VECTOR_SIZE + 17);
+
+	entry.RecordVector(/*rg_idx=*/0, /*vec_idx=*/1, /*has_match=*/false, /*max_row_id=*/STANDARD_VECTOR_SIZE * 2 - 1);
+	entry.RecordVector(/*rg_idx=*/0, /*vec_idx=*/3, /*has_match=*/false, /*max_row_id=*/STANDARD_VECTOR_SIZE * 4 - 1);
+	entry.RecordVector(/*rg_idx=*/0, /*vec_idx=*/4, /*has_match=*/false, /*max_row_id=*/total_rows - 1);
+
+	REQUIRE_FALSE(entry.NeedsObservation(total_rows));
+	REQUIRE(entry.GetUnobservedVectorRanges(total_rows).empty());
+}
+
 } // namespace duckdb

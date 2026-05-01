@@ -69,6 +69,11 @@ struct CacheEntryStats {
 	idx_t total_row_groups;
 };
 
+struct CacheObservationRange {
+	idx_t start_row;
+	idx_t count;
+};
+
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
 	static string ObjectType() {
@@ -104,6 +109,8 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	bool RowIdPassesFilter(row_t row_id) const;
 	// True iff every row group in [min_rg, max_rg] is present, fully observed, and empty.
 	bool StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t max_rg) const;
+	bool NeedsObservation(idx_t total_rows) const;
+	vector<CacheObservationRange> GetUnobservedVectorRanges(idx_t total_rows) const;
 
 	idx_t RowGroupCount() const;
 	bool HasRowGroup(idx_t rg_idx) const;

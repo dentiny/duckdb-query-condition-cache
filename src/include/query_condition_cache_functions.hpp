@@ -16,6 +16,9 @@ class Expression;
 // Modifies bound_expr in-place (remaps column indices to scan positions).
 shared_ptr<ConditionCacheEntry> BuildCacheEntry(ClientContext &context, DuckTableEntry &table_entry,
                                                 Expression &bound_expr);
+shared_ptr<ConditionCacheEntry> BuildCacheEntryForRanges(ClientContext &context, DuckTableEntry &table_entry,
+                                                         Expression &bound_expr,
+                                                         const vector<CacheObservationRange> &ranges);
 
 TableFunction ConditionCacheBuildFunction();
 TableFunction ConditionCacheInfoFunction();

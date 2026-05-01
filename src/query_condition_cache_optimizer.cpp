@@ -127,6 +127,11 @@ bool ReferencesNestedColumn(const vector<unique_ptr<Expression>> &expressions) {
 	return false;
 }
 
+bool IsTruncatingOperator(LogicalOperatorType type) {
+	return type == LogicalOperatorType::LOGICAL_LIMIT || type == LogicalOperatorType::LOGICAL_TOP_N ||
+	       type == LogicalOperatorType::LOGICAL_SAMPLE;
+}
+
 } // namespace
 
 bool QueryConditionCacheOptimizer::IsSettingEnabled(ClientContext &context) {
@@ -150,7 +155,7 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
 	query_state->cache_candidates.clear();
 	try {
-		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
+		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, /*inside_truncating=*/false, *query_state);
 	} catch (...) {
 		// Defense in depth: skip cache optimization rather than failing the query.
 		query_state->cache_candidates.clear();
@@ -158,7 +163,8 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 }
 
 void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan,
-                                                   bool inside_dml, CacheOptimizerQueryState &state) {
+                                                   bool inside_dml, bool inside_truncating,
+                                                   CacheOptimizerQueryState &state) {
 	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN) {
 		return;
 	}
@@ -168,9 +174,10 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	    plan->type == LogicalOperatorType::LOGICAL_DELETE || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
 	    plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_MERGE_INTO;
 	bool child_inside_dml = inside_dml || is_dml;
+	bool child_inside_truncating = inside_truncating || IsTruncatingOperator(plan->type);
 
 	for (auto &child : plan->children) {
-		PreOptimizeWalk(context, child, child_inside_dml, state);
+		PreOptimizeWalk(context, child, child_inside_dml, child_inside_truncating, state);
 	}
 
 	if (inside_dml) {
@@ -223,8 +230,9 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 	auto entry = store->Lookup(context, key);
 	store->RecordAccess(entry != nullptr);
 
-	CacheOptimizerCandidate candidate {std::move(key), std::move(entry), /*cache_hit=*/entry != nullptr};
-	if (candidate.cache_hit && candidate.entry) {
+	CacheOptimizerCandidate candidate {std::move(key), std::move(entry), /*cache_hit=*/entry != nullptr,
+	                                   /*allow_finalize_backfill=*/!inside_truncating};
+	if (candidate.cache_hit && candidate.entry && !candidate.entry->NeedsObservation(storage.GetTotalRows())) {
 		state.cache_candidates[get.table_index] = std::move(candidate);
 		return;
 	}
@@ -396,6 +404,20 @@ bool QueryConditionCacheOptimizer::TryInstallFusedRecorder(ClientContext &contex
 		return false;
 	}
 
+	unique_ptr<Expression> backfill_predicate;
+	if (candidate.allow_finalize_backfill) {
+		vector<unique_ptr<Expression>> backfill_expressions;
+		backfill_expressions.reserve(filter.expressions.size());
+		for (const auto &expr : filter.expressions) {
+			auto copy = expr->Copy();
+			ConvertColumnRefsToScanRefs(copy, get);
+			backfill_expressions.push_back(std::move(copy));
+		}
+		backfill_predicate = CombineWithAnd(std::move(backfill_expressions));
+		backfill_predicate = BoundCastExpression::AddCastToType(context, std::move(backfill_predicate),
+		                                                        LogicalType {LogicalTypeId::BOOLEAN});
+	}
+
 	auto entry = candidate.entry;
 	if (!entry) {
 		entry = make_shared_ptr<ConditionCacheEntry>();
@@ -417,7 +439,10 @@ bool QueryConditionCacheOptimizer::TryInstallFusedRecorder(ClientContext &contex
 	auto child = std::move(filter.children[0]);
 	auto expressions = std::move(filter.expressions);
 	auto fused = make_uniq<LogicalCacheBuildingFilter>(std::move(expressions), std::move(row_id_reference),
-	                                                   row_id_column_index, hide_row_id_column, entry);
+	                                                   row_id_column_index, hide_row_id_column, entry,
+	                                                   table->ParentCatalog().GetName(), table->ParentSchema().name,
+	                                                   table->name, std::move(backfill_predicate),
+	                                                   candidate.allow_finalize_backfill);
 	fused->estimated_cardinality = filter.estimated_cardinality;
 	fused->children.push_back(std::move(child));
 	plan = std::move(fused);

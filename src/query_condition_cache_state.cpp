@@ -219,6 +219,62 @@ bool ConditionCacheEntry::StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t ma
 	return true;
 }
 
+bool ConditionCacheEntry::NeedsObservation(idx_t total_rows) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
+	for (idx_t rg = 0; rg < total_row_groups; ++rg) {
+		auto it = bitvectors.find(rg);
+		if (it == bitvectors.end()) {
+			return true;
+		}
+		idx_t row_group_start = rg * DEFAULT_ROW_GROUP_SIZE;
+		idx_t rows_in_rg = MinValue<idx_t>(DEFAULT_ROW_GROUP_SIZE, total_rows - row_group_start);
+		idx_t vectors_in_rg = (rows_in_rg + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+		for (idx_t vec_idx = 0; vec_idx < vectors_in_rg; ++vec_idx) {
+			if (!it->second.VectorIsObserved(vec_idx)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+vector<CacheObservationRange> ConditionCacheEntry::GetUnobservedVectorRanges(idx_t total_rows) const {
+	concurrency::lock_guard<concurrency::mutex> guard(lock);
+	vector<CacheObservationRange> ranges;
+	idx_t total_row_groups = (total_rows + DEFAULT_ROW_GROUP_SIZE - 1) / DEFAULT_ROW_GROUP_SIZE;
+
+	auto append_range = [&](idx_t start_row, idx_t count) {
+		if (count == 0) {
+			return;
+		}
+		if (!ranges.empty()) {
+			auto &last = ranges.back();
+			if (last.start_row + last.count == start_row) {
+				last.count += count;
+				return;
+			}
+		}
+		ranges.push_back(CacheObservationRange {.start_row = start_row, .count = count});
+	};
+
+	for (idx_t rg = 0; rg < total_row_groups; ++rg) {
+		idx_t row_group_start = rg * DEFAULT_ROW_GROUP_SIZE;
+		idx_t rows_in_rg = MinValue<idx_t>(DEFAULT_ROW_GROUP_SIZE, total_rows - row_group_start);
+		idx_t vectors_in_rg = (rows_in_rg + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+		auto it = bitvectors.find(rg);
+		for (idx_t vec_idx = 0; vec_idx < vectors_in_rg; ++vec_idx) {
+			if (it != bitvectors.end() && it->second.VectorIsObserved(vec_idx)) {
+				continue;
+			}
+			idx_t vector_start = row_group_start + vec_idx * STANDARD_VECTOR_SIZE;
+			idx_t vector_count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total_rows - vector_start);
+			append_range(vector_start, vector_count);
+		}
+	}
+	return ranges;
+}
+
 idx_t ConditionCacheEntry::RowGroupCount() const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	return bitvectors.size();

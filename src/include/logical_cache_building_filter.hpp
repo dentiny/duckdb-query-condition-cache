@@ -11,12 +11,21 @@ struct LogicalCacheBuildingFilter : public LogicalExtensionOperator {
 	explicit LogicalCacheBuildingFilter(vector<unique_ptr<Expression>> filter_expressions_p,
 	                                    unique_ptr<Expression> row_id_reference_p, idx_t row_id_column_index_p,
 	                                    bool hide_row_id_column_p,
-	                                    shared_ptr<ConditionCacheEntry> cache_entry_p = nullptr);
+	                                    shared_ptr<ConditionCacheEntry> cache_entry_p = nullptr,
+	                                    string table_catalog_p = string(), string table_schema_p = string(),
+	                                    string table_name_p = string(),
+	                                    unique_ptr<Expression> backfill_predicate_p = nullptr,
+	                                    bool allow_finalize_backfill_p = true);
 
 	idx_t row_id_column_index;
 	bool hide_row_id_column;
 	idx_t filter_expression_count;
 	shared_ptr<ConditionCacheEntry> cache_entry;
+	string table_catalog;
+	string table_schema;
+	string table_name;
+	unique_ptr<Expression> backfill_predicate;
+	bool allow_finalize_backfill;
 
 	PhysicalOperator &CreatePlan(ClientContext &context, PhysicalPlanGenerator &planner) override;
 	vector<ColumnBinding> GetColumnBindings() override;

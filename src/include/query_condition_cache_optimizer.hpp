@@ -14,6 +14,7 @@ struct CacheOptimizerCandidate {
 	CacheKey key;
 	shared_ptr<ConditionCacheEntry> entry;
 	bool cache_hit;
+	bool allow_finalize_backfill;
 };
 
 // Query-scoped state for passing cache entries between pre-optimize and post-optimize phases.
@@ -47,7 +48,7 @@ private:
 
 	// Walk plan before FilterPushdown: find LogicalFilter -> LogicalGet, compute key, lookup/build cache
 	static void PreOptimizeWalk(ClientContext &context, unique_ptr<LogicalOperator> &plan, bool inside_dml,
-	                            CacheOptimizerQueryState &state);
+	                            bool inside_truncating, CacheOptimizerQueryState &state);
 
 	// Build cache entry for a predicate on a table
 	static shared_ptr<ConditionCacheEntry>

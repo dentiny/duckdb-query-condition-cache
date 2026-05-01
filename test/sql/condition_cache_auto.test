@@ -26,6 +26,27 @@ SELECT * FROM condition_cache_info('t', 'id < 3000');
 ----
 1	5	2	245
 
+# LIMIT can stop the pipeline early, so automatic build should only record
+# vectors that actually flowed through the fused recorder.
+statement ok
+CREATE TABLE limit_t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
+
+statement ok
+SELECT * FROM limit_t WHERE val = 42 LIMIT 1;
+
+query IIII
+SELECT * FROM condition_cache_info('limit_t', 'val = 42');
+----
+1	5	1	245
+
+statement ok
+SELECT count(*) FROM limit_t WHERE val = 42;
+
+query IIII
+SELECT * FROM condition_cache_info('limit_t', 'val = 42');
+----
+5	5	245	245
+
 # Disable setting, new predicates should not be cached
 statement ok
 SET use_query_condition_cache = false;

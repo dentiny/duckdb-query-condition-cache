@@ -1,5 +1,9 @@
 #include "physical_cache_building_filter.hpp"
 
+#include "query_condition_cache_functions.hpp"
+
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -106,10 +110,16 @@ PhysicalCacheBuildingFilter::PhysicalCacheBuildingFilter(PhysicalPlan &physical_
                                                          idx_t row_id_column_index_p,
                                                          bool hide_row_id_column_p,
                                                          shared_ptr<ConditionCacheEntry> cache_entry_p,
+                                                         string table_catalog_p, string table_schema_p,
+                                                         string table_name_p,
+                                                         unique_ptr<Expression> backfill_predicate_p,
+                                                         bool allow_finalize_backfill_p,
                                                          idx_t estimated_cardinality)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, std::move(visible_types), estimated_cardinality),
       row_id_column_index(row_id_column_index_p), hide_row_id_column(hide_row_id_column_p),
-      cache_entry(std::move(cache_entry_p)) {
+      cache_entry(std::move(cache_entry_p)), table_catalog(std::move(table_catalog_p)),
+      table_schema(std::move(table_schema_p)), table_name(std::move(table_name_p)),
+      backfill_predicate(std::move(backfill_predicate_p)), allow_finalize_backfill(allow_finalize_backfill_p) {
 	expression_list.push_back(CombineFilterExpressions(std::move(select_list)));
 }
 
@@ -155,6 +165,33 @@ OperatorResultType PhysicalCacheBuildingFilter::Execute(ExecutionContext &contex
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
+OperatorFinalResultType PhysicalCacheBuildingFilter::OperatorFinalize(Pipeline &pipeline, Event &event,
+                                                                      ClientContext &context,
+                                                                      OperatorFinalizeInput &input) const {
+	if (!cache_entry || !backfill_predicate || table_catalog.empty() || table_schema.empty() || table_name.empty()) {
+		return OperatorFinalResultType::FINISHED;
+	}
+	if (!allow_finalize_backfill) {
+		return OperatorFinalResultType::FINISHED;
+	}
+
+	try {
+		auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, table_catalog, table_schema, table_name);
+		auto ranges = cache_entry->GetUnobservedVectorRanges(table_entry.GetStorage().GetTotalRows());
+		if (!ranges.empty()) {
+			auto backfill_entry = BuildCacheEntryForRanges(context, table_entry, *backfill_predicate, ranges);
+			cache_entry->MergeFrom(*backfill_entry);
+		}
+	} catch (...) {
+		// Backfill is only a cache side effect. The query result has already been produced by DuckDB's normal filter.
+	}
+	return OperatorFinalResultType::FINISHED;
+}
+
+bool PhysicalCacheBuildingFilter::RequiresOperatorFinalize() const {
+	return allow_finalize_backfill && cache_entry != nullptr && backfill_predicate != nullptr;
+}
+
 string PhysicalCacheBuildingFilter::GetName() const {
 	return "CACHE_BUILDING_FILTER";
 }
@@ -165,6 +202,7 @@ InsertionOrderPreservingMap<string> PhysicalCacheBuildingFilter::ParamsToString(
 	result["Row ID Column"] = to_string(row_id_column_index);
 	result["Hidden Row ID"] = hide_row_id_column ? "true" : "false";
 	result["Recording"] = cache_entry ? "true" : "false";
+	result["Finalize Backfill"] = allow_finalize_backfill ? "true" : "false";
 	SetEstimatedCardinality(result, estimated_cardinality);
 	return result;
 }

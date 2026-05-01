@@ -10,9 +10,16 @@ namespace duckdb {
 LogicalCacheBuildingFilter::LogicalCacheBuildingFilter(vector<unique_ptr<Expression>> filter_expressions_p,
                                                        unique_ptr<Expression> row_id_reference_p,
                                                        idx_t row_id_column_index_p, bool hide_row_id_column_p,
-                                                       shared_ptr<ConditionCacheEntry> cache_entry_p)
+                                                       shared_ptr<ConditionCacheEntry> cache_entry_p,
+                                                       string table_catalog_p, string table_schema_p,
+                                                       string table_name_p,
+                                                       unique_ptr<Expression> backfill_predicate_p,
+                                                       bool allow_finalize_backfill_p)
     : row_id_column_index(row_id_column_index_p), hide_row_id_column(hide_row_id_column_p),
-      filter_expression_count(filter_expressions_p.size()), cache_entry(std::move(cache_entry_p)) {
+      filter_expression_count(filter_expressions_p.size()), cache_entry(std::move(cache_entry_p)),
+      table_catalog(std::move(table_catalog_p)), table_schema(std::move(table_schema_p)),
+      table_name(std::move(table_name_p)), backfill_predicate(std::move(backfill_predicate_p)),
+      allow_finalize_backfill(allow_finalize_backfill_p) {
 	expressions = std::move(filter_expressions_p);
 	expressions.push_back(std::move(row_id_reference_p));
 }
@@ -30,9 +37,11 @@ PhysicalOperator &LogicalCacheBuildingFilter::CreatePlan(ClientContext &context,
 	for (idx_t i = 0; i < filter_expression_count; ++i) {
 		filter_expressions.push_back(std::move(expressions[i]));
 	}
-
 	auto &op = planner.Make<PhysicalCacheBuildingFilter>(types, std::move(filter_expressions), row_id_column_index,
-	                                                     hide_row_id_column, cache_entry, estimated_cardinality);
+	                                                     hide_row_id_column, cache_entry, table_catalog, table_schema,
+	                                                     table_name, std::move(backfill_predicate),
+	                                                     allow_finalize_backfill,
+	                                                     estimated_cardinality);
 	op.children.push_back(child_plan);
 	return op;
 }
