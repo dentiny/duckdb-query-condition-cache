@@ -4,8 +4,8 @@
 #include "concurrency/annotated_mutex.hpp"
 #include "concurrency/thread_annotation.hpp"
 
-#include "duckdb/common/array.hpp"
 #include "duckdb/common/atomic.hpp"
+#include "duckdb/common/bitset.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -15,15 +15,13 @@ namespace duckdb {
 
 // Derived from DuckDB's compile-time configurable constants
 inline constexpr idx_t VECTORS_PER_ROW_GROUP = DEFAULT_ROW_GROUP_SIZE / STANDARD_VECTOR_SIZE;
-inline constexpr idx_t BITVECTOR_ARRAY_SIZE = (VECTORS_PER_ROW_GROUP + 63) / 64;
 static_assert(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE == 0,
               "DEFAULT_ROW_GROUP_SIZE must be divisible by STANDARD_VECTOR_SIZE");
 
 // Per row-group bitvector: bit[i] = 1 means vector i has at least one qualifying row,
 // for 0 <= i < VECTORS_PER_ROW_GROUP.
-// Backed by array<uint64_t, N> to support configurable row group / vector sizes.
 struct RowGroupFilter {
-	array<uint64_t, BITVECTOR_ARRAY_SIZE> matching_vectors = {};
+	bitset<VECTORS_PER_ROW_GROUP> matching_vectors;
 
 	RowGroupFilter() = default;
 
@@ -34,6 +32,7 @@ struct RowGroupFilter {
 	void SetVector(idx_t vector_index);
 	bool VectorHasRows(idx_t vector_index) const;
 	bool IsEmpty() const;
+	idx_t QualifyingVectorCount() const;
 	void MergeFrom(const RowGroupFilter &other);
 };
 
