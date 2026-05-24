@@ -15,12 +15,13 @@ Before starting, confirm the target DuckDB version (e.g. `v1.5.2`). Everything e
 
 Track these as a checklist; do not skip ahead:
 
-```
-- [ ] 1. Pin duckdb submodule to tags/$TARGET
-- [ ] 2. Pin extension-ci-tools submodule to $TARGET, or the latest compatible branch/tag if $TARGET is unavailable
-- [ ] 4. Build: CMAKE_BUILD_PARALLEL_LEVEL=10 make reldebug
-- [ ] 5. Test: make test_reldebug
-```
+- 1. Pin duckdb submodule to tags/$TARGET
+- 2. Pin extension-ci-tools submodule to $TARGET (same tag)
+- 3. Pin duckdb-httpfs submodule based on DuckDB repo commit
+- 4. Build: CMAKE_BUILD_PARALLEL_LEVEL=10 make reldebug
+- 5. Run tests (both must pass):
+  + SQL test: `make test_reldebug` (expands to `./build/reldebug/test/unittest "test/*"`)
+  + C++ test: `./build/reldebug/extension/query_condition_cache/test/unittest/unittest_query_condition_cache`
 
 ## Reference: historical upgrade commits
 
