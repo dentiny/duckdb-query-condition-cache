@@ -1,4 +1,12 @@
-## Changelog
+# Changelog
+
+## 0.1.1
+
+### Updated
+
+- Upgrade DuckDB to v1.5.4
+
+## v0.1.0
 
 ### Added
 
