@@ -2,11 +2,17 @@
 #include "query_condition_cache_filter.hpp"
 #include "query_condition_cache_state.hpp"
 
+#include "duckdb/common/allocator.hpp"
+#include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
 #include "test_helpers.hpp"
@@ -64,6 +70,40 @@ TEST_CASE("CacheExpressionFilter - CheckStatistics", "[query_condition_cache]") 
 	SECTION("stats without min/max: no pruning") {
 		auto stats = NumericStats::CreateUnknown(LogicalType {LogicalTypeId::BIGINT});
 		REQUIRE(filter.CheckStatistics(stats) == FilterPropagateResult::NO_PRUNING_POSSIBLE);
+	}
+}
+
+TEST_CASE("ConditionCacheFilterFn handles scan vectors crossing cache-vector boundaries", "[query_condition_cache]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	const auto entry = make_shared_ptr<ConditionCacheEntry>();
+	entry->EnsureRowGroup(/*rg_idx=*/0);
+	entry->SetQualifyingVector(/*rg_idx=*/0, /*vec_idx=*/1);
+
+	vector<unique_ptr<Expression>> children;
+	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0));
+	const auto expression =
+	    make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFunction(),
+	                                       std::move(children), make_uniq<ConditionCacheFilterBindData>(entry));
+	ExpressionExecutor executor(*con.context, *expression);
+
+	DataChunk input;
+	input.Initialize(Allocator::Get(*con.context), {LogicalType {LogicalTypeId::BIGINT}});
+	input.SetCardinality(STANDARD_VECTOR_SIZE);
+	const auto row_ids = FlatVector::GetData<int64_t>(input.data[0]);
+	for (idx_t idx = 0; idx < STANDARD_VECTOR_SIZE; idx++) {
+		row_ids[idx] = NumericCast<int64_t>(1536 + idx);
+	}
+
+	Vector result(LogicalType {LogicalTypeId::BOOLEAN});
+	executor.ExecuteExpression(input, result);
+
+	for (idx_t idx = 0; idx < 512; idx++) {
+		REQUIRE(result.GetValue(idx).GetValue<bool>() == false);
+	}
+	for (idx_t idx = 512; idx < STANDARD_VECTOR_SIZE; idx++) {
+		REQUIRE(result.GetValue(idx).GetValue<bool>() == true);
 	}
 }
 
