@@ -100,10 +100,10 @@ TEST_CASE("ConditionCacheFilterFn handles scan vectors crossing cache-vector bou
 	executor.ExecuteExpression(input, result);
 
 	for (idx_t idx = 0; idx < 512; idx++) {
-		REQUIRE(result.GetValue(idx).GetValue<bool>() == false);
+		REQUIRE(!result.GetValue(idx).GetValue<bool>());
 	}
 	for (idx_t idx = 512; idx < STANDARD_VECTOR_SIZE; idx++) {
-		REQUIRE(result.GetValue(idx).GetValue<bool>() == true);
+		REQUIRE(result.GetValue(idx).GetValue<bool>());
 	}
 }
 
