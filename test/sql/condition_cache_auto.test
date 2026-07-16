@@ -7,9 +7,11 @@ require query_condition_cache
 statement ok
 CREATE TABLE t AS SELECT i AS id, i % 100 AS val FROM range(500000) t(i);
 
-# Cache enabled by default, query triggers auto cache build
-statement ok
+# Auto-build preserves the query result
+query I
 SELECT count(*) FROM t WHERE val = 42;
+----
+5000
 
 # Cache was built automatically
 query IIII
@@ -17,9 +19,11 @@ SELECT * FROM condition_cache_info('t', 'val = 42');
 ----
 5	5	245	245
 
-# Different predicate gets its own cache entry
-statement ok
+# A different predicate builds a separate cache entry
+query I
 SELECT count(*) FROM t WHERE id < 3000;
+----
+3000
 
 query IIII
 SELECT * FROM condition_cache_info('t', 'id < 3000');

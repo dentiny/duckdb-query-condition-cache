@@ -1,0 +1,71 @@
+# name: test/sql/condition_cache_alignment.test
+# description: Test cache filtering across misaligned physical row groups
+# group: [sql]
+
+require query_condition_cache
+
+# Parallel CSV ingestion can produce intermediate partial physical row groups.
+# Preserve input order so the stored predicate pattern remains deterministic.
+statement ok
+SET threads = 8;
+
+statement ok
+SET preserve_insertion_order = true;
+
+statement ok
+COPY (
+    SELECT
+        i AS id,
+        CASE WHEN (i // 2048) % 2 = 0
+             THEN 'needle-' || i::VARCHAR
+             ELSE 'ordinary-' || i::VARCHAR
+        END AS content
+    FROM range(750000) r(i)
+) TO '__TEST_DIR__/condition_cache_alignment.csv' (HEADER);
+
+statement ok
+CREATE TABLE alignment_t AS
+SELECT *
+FROM read_csv_auto('__TEST_DIR__/condition_cache_alignment.csv', header = true);
+
+statement ok
+CHECKPOINT;
+
+# Ensure the table contains multiple intermediate partial row groups. Their
+# scan vectors are aligned to physical row-group starts, which need not align
+# with cache vectors derived from absolute ROW_IDs.
+query I
+SELECT count(*) >= 2
+FROM (
+    SELECT row_group_id, max(start + count) AS row_count
+    FROM pragma_storage_info('alignment_t')
+    GROUP BY row_group_id
+) row_groups
+WHERE row_count < 122880;
+----
+true
+
+# Establish the exact result without the condition cache.
+statement ok
+SET use_query_condition_cache = false;
+
+query I
+SELECT count(*) FROM alignment_t WHERE content LIKE '%needle%';
+----
+375216
+
+# A cache miss builds the entry and applies it to the original query.
+statement ok
+SET use_query_condition_cache = true;
+
+query I
+SELECT count(*) FROM alignment_t WHERE content LIKE '%needle%';
+----
+375216
+
+# Reusing the entry must preserve rows when a scan vector crosses a cache
+# boundary.
+query I
+SELECT count(*) FROM alignment_t WHERE content LIKE '%needle%';
+----
+375216
