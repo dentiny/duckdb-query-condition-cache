@@ -12,17 +12,6 @@ The extension must be built first (`GEN=ninja make`). Scripts auto-detect the bu
 
 ## Python Benchmarks
 
-All Python scripts share the same measurement protocol:
-
-1. **Cold run** (cache OFF) — warms OS page cache
-2. **Warm baseline** (cache OFF, N repeats) — true baseline
-3. **Cache build** (cache ON, first run) — builds the condition cache
-4. **Cache hit** (cache ON, N repeats) — measures cached performance
-
-**Speedup = avg(baseline) / avg(cache hit)**
-
-OS page caches are dropped between phases (requires `sudo` for `purge`/`drop_caches`).
-
 ### `run_clickbench_benchmark.py`
 
 Runs 43 ClickBench queries (Q00–Q42) on the `hits` table. Downloads ~15 GB of parquet data from ClickHouse on first run and caches it in `clickbench.duckdb`.
@@ -41,9 +30,40 @@ Downloads the HDFS_v2 dataset from Zenodo (~71M rows from a 32-node cluster). Sa
 - **Story 2** — SRE Replication Drill-Down: `addStoredBlock` analysis
 - **Story 3** — Error Investigation: WARN/ERROR + Exception patterns
 
+The HDFS harness requires a valid cached sudo credential to purge the OS page
+cache before each sample. Refresh it before starting:
+
 ```bash
-uv run python benchmark/run_hdfs_log_benchmark.py --repeat 5 --stories 1,2,3
+sudo -v
 ```
+
+The HDFS harness runs exactly one page-cache/condition-cache mode per
+invocation:
+
+```text
+cold-baseline
+cold-build
+cold-cache-hit
+warm-baseline
+warm-build
+warm-cache-hit
+```
+
+For example:
+
+```bash
+uv run python benchmark/run_hdfs_log_benchmark.py \
+  --mode warm-cache-hit \
+  --repeat 5 \
+  --stories 1
+```
+
+Every measured sample begins with an OS page-cache purge and a fresh DuckDB
+connection. A warm mode additionally runs one untimed normal query with the
+condition cache disabled. Build modes time the complete first query with the
+condition cache enabled and no matching entry, including automatic cache
+construction and execution of the original query. Cache-hit modes build the
+entry outside the measured interval.
 
 ## Output
 

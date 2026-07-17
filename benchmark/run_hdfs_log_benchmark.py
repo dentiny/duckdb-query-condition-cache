@@ -13,15 +13,16 @@ benchmarks three real-world observability stories.
 The dataset is significantly larger than Spark (~71M rows vs ~33M), making the
 performance gap between cached and uncached queries more pronounced.
 
-Per-story protocol:
-  Baseline: N warm runs with cache OFF on a single connection.
-  Cached:   cache ON, first run builds cache, N warm runs measure hits.
-  OS page caches are dropped between baseline and cached passes.
-
-  Speedup = avg(baseline) / avg(cache hit)
+Each invocation runs exactly one measurement mode:
+  cold-baseline   -- purge page cache, then run with condition cache disabled
+  cold-build      -- purge, then time a cache-miss query that auto-builds
+  cold-cache-hit  -- build the condition cache, purge page cache, then run
+  warm-baseline   -- purge, run one normal warm-up query, then run cache-off
+  warm-build      -- purge, warm once cache-off, then time an auto-build query
+  warm-cache-hit  -- purge, run one normal warm-up query, build, then run cached
 
 Usage:
-    python benchmark/run_hdfs_log_benchmark.py [--repeat N] [--out FILE] [--stories 1,2,3]
+    python benchmark/run_hdfs_log_benchmark.py --mode MODE [--repeat N] [--stories 1,2,3]
 """
 
 import argparse
@@ -59,11 +60,11 @@ HDFS_DB_PATH = WORKSPACE / "benchmark" / "hdfs_logs.duckdb"
 # Regex to parse Hadoop log4j lines:
 #   2016-10-22 13:28:13,003 INFO org.apache.hadoop.hdfs.StateChange: DIR* completeFile: ...
 _LOG_RE = re.compile(
-    r"^(\d{4}-\d{2}-\d{2})\s+"      # date
-    r"(\d{2}:\d{2}:\d{2}),\d{3}\s+" # time (drop millis for grouping)
-    r"(\w+)\s+"                      # level (INFO, WARN, ERROR, etc.)
-    r"([^:]+):\s+"                   # component (java class / short name)
-    r"(.*)$"                         # message content
+    r"^(\d{4}-\d{2}-\d{2})\s+"  # date
+    r"(\d{2}:\d{2}:\d{2}),\d{3}\s+"  # time (drop millis for grouping)
+    r"(\w+)\s+"  # level (INFO, WARN, ERROR, etc.)
+    r"([^:]+):\s+"  # component (java class / short name)
+    r"(.*)$"  # message content
 )
 
 # ---------------------------------------------------------------------------
@@ -125,10 +126,39 @@ STORIES = {
     3: ("Story 3: Error & Exception Investigation", STORY_3_QUERIES),
 }
 
+QUERY_PREDICATES = {
+    "S1-W1: Block Event Count": "Content LIKE '%blk_%'",
+    "S1-W2: Block Events by Level": "Content LIKE '%blk_%'",
+    "S1-W3: Block Events by Component": "Content LIKE '%blk_%'",
+    "S1-W4: Block + Replication": "Content LIKE '%blk_%' AND Content LIKE '%replicas%'",
+    "S2-Q1: addStoredBlock events": "Content LIKE '%addStoredBlock%'",
+    "S2-Q2: addStoredBlock + specific IP": (
+        "Content LIKE '%addStoredBlock%' AND Content LIKE '%10.10.34.11%'"
+    ),
+    "S2-Q3: addStoredBlock aggregate by date": (
+        "Content LIKE '%addStoredBlock%' AND Content LIKE '%10.10.34.11%'"
+    ),
+    "S3-Q1: WARN + ERROR logs": "Level = 'WARN' OR Level = 'ERROR'",
+    "S3-Q2: Exceptions in content": "Content LIKE '%Exception%'",
+    "S3-Q3: Exception + block correlation": (
+        "Content LIKE '%Exception%' AND Content LIKE '%blk_%'"
+    ),
+}
+
+MODES = (
+    "cold-baseline",
+    "cold-build",
+    "cold-cache-hit",
+    "warm-baseline",
+    "warm-build",
+    "warm-cache-hit",
+)
+
 
 # ---------------------------------------------------------------------------
 # Data download, parsing & loading
 # ---------------------------------------------------------------------------
+
 
 def download_hdfs_data():
     """Download and extract the HDFS_v2 dataset from Zenodo."""
@@ -169,7 +199,10 @@ def parse_and_load_logs(log_files: list[Path], db_path: Path):
     csv_path = HDFS_DATA_DIR / "hdfs_parsed.csv"
 
     if not csv_path.exists():
-        print("Parsing raw HDFS logs into CSV (this may take a few minutes)...", flush=True)
+        print(
+            "Parsing raw HDFS logs into CSV (this may take a few minutes)...",
+            flush=True,
+        )
         total_lines = 0
         parsed_lines = 0
         skipped_lines = 0
@@ -192,7 +225,9 @@ def parse_and_load_logs(log_files: list[Path], db_path: Path):
                             # CSV-escape: double any quotes in content
                             content = content.replace('"', '""')
                             component = component.strip()
-                            out.write(f'{date},{time_str},{level},"{component}","{content}","{source}"\n')
+                            out.write(
+                                f'{date},{time_str},{level},"{component}","{content}","{source}"\n'
+                            )
                             file_parsed += 1
 
                 total_lines += file_lines
@@ -210,11 +245,7 @@ def parse_and_load_logs(log_files: list[Path], db_path: Path):
 
     # Load into DuckDB
     print(f"Loading parsed CSV into DuckDB at {db_path}...", flush=True)
-    con = duckdb.connect(str(db_path), config={"allow_unsigned_extensions": True})
-    if EXT_PATH.exists():
-        con.execute(f"LOAD '{EXT_PATH}';")
-    else:
-        con.execute("LOAD query_condition_cache;")
+    con = duckdb.connect(str(db_path))
 
     con.execute(f"""
         CREATE TABLE logs AS
@@ -275,24 +306,51 @@ def ensure_hdfs_data(args):
 # Benchmark infrastructure (matches clickbench/tpch/spark pattern)
 # ---------------------------------------------------------------------------
 
+
+def require_local_extension() -> Path:
+    """Return the local extension path or fail before running the benchmark."""
+    if not EXT_PATH.is_file():
+        raise FileNotFoundError(
+            f"Local QueryConditionCache extension not found at {EXT_PATH}. "
+            "Build it first with `GEN=ninja make`."
+        )
+    return EXT_PATH
+
+
 def drop_os_caches():
-    """Best-effort OS page cache drop. Requires sudo on macOS, root on Linux."""
+    """Drop the OS page cache or fail rather than silently mislabeling a run."""
+    if platform.system() == "Darwin":
+        command = ["sudo", "-n", "purge"]
+    elif platform.system() == "Linux":
+        command = [
+            "sudo",
+            "-n",
+            "sh",
+            "-c",
+            "sync && echo 3 > /proc/sys/vm/drop_caches",
+        ]
+    else:
+        raise RuntimeError(
+            f"Page-cache purge is not implemented for {platform.system()}"
+        )
+
     try:
-        if platform.system() == "Darwin":
-            subprocess.run(["sudo", "-n", "purge"], capture_output=True, timeout=10)
-        else:
-            subprocess.run(
-                ["sudo", "-n", "sh", "-c", "sync && echo 3 > /proc/sys/vm/drop_caches"],
-                capture_output=True, timeout=10,
-            )
-    except Exception:
-        pass  # best-effort; not fatal if unavailable
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Timed out while purging the OS page cache") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise RuntimeError(
+            "Failed to purge the OS page cache. Run `sudo -v` before the benchmark. "
+            f"Command output: {detail}"
+        )
 
 
 def open_connection(db_path: Path, args):
     """Open a fresh DuckDB connection with the extension loaded."""
     import duckdb
 
+    extension_path = require_local_extension()
     cfg: dict = {"allow_unsigned_extensions": True}
     if args.threads:
         cfg["threads"] = args.threads
@@ -300,167 +358,116 @@ def open_connection(db_path: Path, args):
         cfg["memory_limit"] = args.memory_limit
 
     con = duckdb.connect(str(db_path), config=cfg)
-    if EXT_PATH.exists():
-        con.execute(f"LOAD '{EXT_PATH}';")
-    else:
-        con.execute("LOAD query_condition_cache;")
+    con.execute(f"LOAD '{extension_path}';")
     return con
 
 
-def time_query(con, sql: str, repeat: int) -> list[float]:
-    """Run sql `repeat` times and return list of elapsed times in ms."""
-    times = []
-    for _ in range(repeat):
-        t0 = time.perf_counter()
-        con.execute(sql).fetchall()
-        times.append((time.perf_counter() - t0) * 1000)
-    return times
+def time_query_once(con, sql: str) -> float:
+    t0 = time.perf_counter()
+    con.execute(sql).fetchall()
+    return (time.perf_counter() - t0) * 1000
 
 
-def benchmark_query(con, label: str, sql: str, repeat: int) -> dict:
-    """Run the 4-step protocol and return timing results."""
-    # Step 1 & 2: cache OFF
-    con.execute("SET use_query_condition_cache = false;")
-    t_cold = time_query(con, sql, 1)[0]
-    t_warm_no_cache = time_query(con, sql, repeat)
-
-    # Step 3 & 4: cache ON
-    con.execute("SET use_query_condition_cache = true;")
-    t_build = time_query(con, sql, 1)[0]
-    t_cache_hit = time_query(con, sql, repeat)
-
-    con.execute("SET use_query_condition_cache = false;")
-
-    baseline_avg = statistics.mean(t_warm_no_cache)
-    baseline_std = statistics.stdev(t_warm_no_cache) if len(t_warm_no_cache) > 1 else 0.0
-    cache_hit_avg = statistics.mean(t_cache_hit)
-    cache_hit_std = statistics.stdev(t_cache_hit) if len(t_cache_hit) > 1 else 0.0
-    speedup = baseline_avg / cache_hit_avg if cache_hit_avg > 0 else float("inf")
-
-    return {
-        "label": label,
-        "cold_ms": t_cold,
-        "baseline_avg": baseline_avg,
-        "baseline_std": baseline_std,
-        "baseline_runs": t_warm_no_cache,
-        "build_ms": t_build,
-        "cache_hit_avg": cache_hit_avg,
-        "cache_hit_std": cache_hit_std,
-        "cache_hit_runs": t_cache_hit,
-        "speedup": speedup,
-    }
-
-
-def benchmark_story(db_path: Path, args, story_name: str, queries: list[tuple[str, str]], repeat: int) -> list[dict]:
-    """
-    Run a story's queries sequentially on a single connection.
-
-    Cache built by query N benefits query N+1 within the same story.
-    """
-    print(f"\n### {story_name}", flush=True)
-    results = []
-
-    # --- Baseline pass: cache OFF, all queries ---
-    drop_os_caches()
-    con = open_connection(db_path, args)
-    con.execute("SET use_query_condition_cache = false;")
-
-    # Cold run (warms OS cache)
-    for label, sql in queries:
-        time_query(con, sql, 1)
-
-    # Warm baseline runs
-    baseline_times = {}
-    for label, sql in queries:
-        baseline_times[label] = time_query(con, sql, repeat)
-    con.close()
-
-    # --- Cached pass: cache ON, all queries (cache builds on first, reuses on rest) ---
-    drop_os_caches()
-    con = open_connection(db_path, args)
-    con.execute("SET use_query_condition_cache = true;")
-
-    # Cold + cache build run
-    build_times = {}
-    for label, sql in queries:
-        t0 = time.perf_counter()
-        con.execute(sql).fetchall()
-        build_times[label] = (time.perf_counter() - t0) * 1000
-
-    # Warm cache hit runs
-    cache_hit_times = {}
-    for label, sql in queries:
-        cache_hit_times[label] = time_query(con, sql, repeat)
-    con.close()
-
-    # Assemble results
-    for label, sql in queries:
-        short = label.split(":")[0]
-        bl = baseline_times[label]
-        ch = cache_hit_times[label]
-        baseline_avg = statistics.mean(bl)
-        baseline_std = statistics.stdev(bl) if len(bl) > 1 else 0.0
-        cache_hit_avg = statistics.mean(ch)
-        cache_hit_std = statistics.stdev(ch) if len(ch) > 1 else 0.0
-        speedup = baseline_avg / cache_hit_avg if cache_hit_avg > 0 else float("inf")
-
-        r = {
-            "label": label,
-            "cold_ms": 0,
-            "baseline_avg": baseline_avg,
-            "baseline_std": baseline_std,
-            "baseline_runs": bl,
-            "build_ms": build_times[label],
-            "cache_hit_avg": cache_hit_avg,
-            "cache_hit_std": cache_hit_std,
-            "cache_hit_runs": ch,
-            "speedup": speedup,
-        }
-        results.append(r)
-        print(
-            f"  {short}:  baseline={baseline_avg:.0f}±{baseline_std:.0f}ms  "
-            f"hit={cache_hit_avg:.0f}±{cache_hit_std:.0f}ms  {speedup:.2f}x",
-            flush=True,
+def verify_cache_entry(con, predicate: str):
+    total_row_groups = con.execute(
+        "SELECT total_row_groups FROM condition_cache_info(?, ?)",
+        ["logs", predicate],
+    ).fetchone()[0]
+    if total_row_groups == 0:
+        raise RuntimeError(
+            f"Cache build produced no cached row groups for: {predicate}"
         )
 
-    # Compute story-level totals
-    total_baseline = sum(statistics.mean(baseline_times[l]) for l, _ in queries)
-    total_cached = sum(statistics.mean(cache_hit_times[l]) for l, _ in queries)
-    story_speedup = total_baseline / total_cached if total_cached > 0 else float("inf")
-    print(
-        f"  ** Story total: baseline={total_baseline:.0f}ms  cached={total_cached:.0f}ms  "
-        f"speedup={story_speedup:.2f}x **",
-        flush=True,
-    )
 
-    return results
+def build_cache(con, predicate: str):
+    con.execute(
+        "SELECT * FROM condition_cache_build(?, ?)",
+        ["logs", predicate],
+    ).fetchall()
+    verify_cache_entry(con, predicate)
 
 
-def run_individual_queries(db_path: Path, args, repeat: int) -> list[dict]:
-    """Run each story query individually with full 4-step protocol (fresh connection per query)."""
-    print("\nRunning all queries individually (fresh connection per query)...", flush=True)
-    results = []
-    all_queries = []
-    for story_id in sorted(STORIES.keys()):
+def selected_query_cases(story_ids: list[int]) -> list[tuple[str, str, str]]:
+    cases = []
+    for story_id in story_ids:
         _, queries = STORIES[story_id]
-        all_queries.extend(queries)
+        for label, sql in queries:
+            cases.append((label, sql, QUERY_PREDICATES[label]))
+    return cases
 
-    for label, sql in all_queries:
-        short = label.split(":")[0]
-        print(f"  {short}...", end=" ", flush=True)
-        try:
+
+def measure_once(db_path: Path, args, mode: str, sql: str, predicate: str) -> float:
+    # Every sample starts from a purged OS page cache and a fresh connection.
+    drop_os_caches()
+    con = open_connection(db_path, args)
+    try:
+        con.execute("SET use_query_condition_cache = false;")
+
+        if mode == "cold-baseline":
+            return time_query_once(con, sql)
+
+        if mode == "cold-build":
+            con.execute("SET use_query_condition_cache = true;")
+            elapsed_ms = time_query_once(con, sql)
+            verify_cache_entry(con, predicate)
+            return elapsed_ms
+
+        if mode == "cold-cache-hit":
+            build_cache(con, predicate)
+            con.execute("SET use_query_condition_cache = true;")
             drop_os_caches()
-            con = open_connection(db_path, args)
-            result = benchmark_query(con, label, sql, repeat)
-            con.close()
-            results.append(result)
+            return time_query_once(con, sql)
+
+        # The warm-state definition is shared by all warm modes: after the
+        # purge, run one normal query with the condition cache disabled.
+        time_query_once(con, sql)
+
+        if mode == "warm-baseline":
+            return time_query_once(con, sql)
+
+        if mode == "warm-build":
+            con.execute("SET use_query_condition_cache = true;")
+            elapsed_ms = time_query_once(con, sql)
+            verify_cache_entry(con, predicate)
+            return elapsed_ms
+
+        if mode == "warm-cache-hit":
+            build_cache(con, predicate)
+            con.execute("SET use_query_condition_cache = true;")
+            return time_query_once(con, sql)
+
+        raise ValueError(f"Unknown benchmark mode: {mode}")
+    finally:
+        con.close()
+
+
+def run_mode(db_path: Path, args, story_ids: list[int]) -> list[dict]:
+    cases = selected_query_cases(story_ids)
+    results = []
+    print(f"\nRunning mode: {args.mode}", flush=True)
+    for label, sql, predicate in cases:
+        short = label.split(":")[0]
+        times = []
+        print(f"  {short}", flush=True)
+        for sample in range(args.repeat):
+            elapsed_ms = measure_once(db_path, args, args.mode, sql, predicate)
+            times.append(elapsed_ms)
             print(
-                f"baseline={result['baseline_avg']:.0f}±{result['baseline_std']:.0f}ms  "
-                f"hit={result['cache_hit_avg']:.0f}±{result['cache_hit_std']:.0f}ms  {result['speedup']:.2f}x",
+                f"    sample {sample + 1}/{args.repeat}: {elapsed_ms:.1f} ms",
                 flush=True,
             )
-        except Exception as e:
-            print(f"FAILED: {e}", flush=True)
+        avg_ms = statistics.mean(times)
+        std_ms = statistics.stdev(times) if len(times) > 1 else 0.0
+        results.append(
+            {
+                "label": label,
+                "predicate": predicate,
+                "avg_ms": avg_ms,
+                "std_ms": std_ms,
+                "runs_ms": times,
+            }
+        )
+        print(f"    average: {avg_ms:.1f} ± {std_ms:.1f} ms", flush=True)
     return results
 
 
@@ -468,40 +475,24 @@ def run_individual_queries(db_path: Path, args, repeat: int) -> list[dict]:
 # Output formatting
 # ---------------------------------------------------------------------------
 
-def format_table(title: str, results: list[dict], repeat: int) -> str:
+
+def format_table(mode: str, results: list[dict], repeat: int) -> str:
     lines = [
-        f"## {title} (avg±std of {repeat} warm runs)\n",
-        "| Query | Baseline avg±std (ms) | Cache Build (ms) | Cache Hit avg±std (ms) | Speedup |",
-        "|-------|-----------------------|------------------|------------------------|---------|",
+        f"## {mode} (avg ± std of {repeat} independent samples)\n",
+        "| Query | Predicate | Time (ms) | Samples (ms) |",
+        "|-------|-----------|----------:|--------------|",
     ]
     for r in results:
+        samples = ", ".join(f"{value:.1f}" for value in r["runs_ms"])
         lines.append(
-            f"| {r['label']:<45} "
-            f"| {r['baseline_avg']:>10.1f} ± {r['baseline_std']:<8.1f} "
-            f"| {r['build_ms']:>16.1f} "
-            f"| {r['cache_hit_avg']:>11.1f} ± {r['cache_hit_std']:<8.1f} "
-            f"| {r['speedup']:>6.2f}x |"
+            f"| {r['label']} | `{r['predicate']}` "
+            f"| {r['avg_ms']:.1f} ± {r['std_ms']:.1f} | {samples} |"
         )
-
-    # Story total row
-    if results:
-        total_bl = sum(r["baseline_avg"] for r in results)
-        total_ch = sum(r["cache_hit_avg"] for r in results)
-        total_build = sum(r["build_ms"] for r in results)
-        total_speedup = total_bl / total_ch if total_ch > 0 else float("inf")
-        lines.append(
-            f"| {'**TOTAL**':<45} "
-            f"| {total_bl:>10.1f} {'':>11} "
-            f"| {total_build:>16.1f} "
-            f"| {total_ch:>11.1f} {'':>11} "
-            f"| **{total_speedup:.2f}x** |"
-        )
-
     lines.append("")
     return "\n".join(lines)
 
 
-def plot_results(all_story_results: dict, out_path: Path):
+def plot_results(results: list[dict], mode: str, out_path: Path):
     try:
         import matplotlib.pyplot as plt
         import numpy as np
@@ -509,48 +500,19 @@ def plot_results(all_story_results: dict, out_path: Path):
         print("matplotlib/numpy not available, skipping chart generation.")
         return
 
-    n_stories = len(all_story_results)
-    fig, axes = plt.subplots(1, n_stories, figsize=(7 * n_stories, 7))
-    if n_stories == 1:
-        axes = [axes]
-    fig.suptitle("QueryConditionCache — HDFS Log Analytics (avg ± std)", fontsize=14, fontweight="bold")
+    if not results:
+        return
+    labels = [r["label"].split(":")[0] for r in results]
+    averages = [r["avg_ms"] for r in results]
+    deviations = [r["std_ms"] for r in results]
+    x = np.arange(len(labels))
 
-    bar_width = 0.35
-    for ax, (story_id, (story_name, results)) in zip(axes, all_story_results.items()):
-        if not results:
-            ax.set_visible(False)
-            continue
-
-        labels = [r["label"].split(":")[0] for r in results]
-        baseline_avgs = [r["baseline_avg"] for r in results]
-        baseline_stds = [r["baseline_std"] for r in results]
-        cached_avgs = [r["cache_hit_avg"] for r in results]
-        cached_stds = [r["cache_hit_std"] for r in results]
-
-        x = np.arange(len(labels))
-        ax.bar(x - bar_width / 2, baseline_avgs, bar_width, yerr=baseline_stds,
-               capsize=3, label="Baseline (no cache)", color="#9E9E9E", edgecolor="white")
-        ax.bar(x + bar_width / 2, cached_avgs, bar_width, yerr=cached_stds,
-               capsize=3, label="Cached", color="#4CAF50", edgecolor="white")
-
-        # Log scale when range is too large
-        all_vals = [v for v in baseline_avgs + cached_avgs if v > 0]
-        if all_vals and max(all_vals) / min(all_vals) > 50:
-            ax.set_yscale("log")
-
-        # Annotate speedup
-        for i, r in enumerate(results):
-            top = max(baseline_avgs[i] + baseline_stds[i], cached_avgs[i] + cached_stds[i])
-            if r["speedup"] >= 1.05:
-                ax.text(x[i], top * 1.05, f"{r['speedup']:.1f}x",
-                        ha="center", va="bottom", fontsize=8, fontweight="bold", color="#2E7D32")
-
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
-        ax.set_ylabel("Time (ms)")
-        ax.set_title(story_name, fontsize=10)
-        ax.legend(fontsize=8)
-
+    _, ax = plt.subplots(figsize=(max(7, len(labels) * 1.2), 6))
+    ax.bar(x, averages, yerr=deviations, capsize=4, color="#4C78A8", edgecolor="white")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.set_ylabel("Time (ms)")
+    ax.set_title(f"QueryConditionCache — HDFS {mode} (avg ± std)")
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Chart saved to {out_path}")
@@ -561,48 +523,68 @@ def plot_results(all_story_results: dict, out_path: Path):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
-    parser = argparse.ArgumentParser(description="QueryConditionCache HDFS Log Analytics benchmark")
-    parser.add_argument(
-        "--repeat", type=int, default=3,
-        help="Number of warm runs per phase (default: 3)",
+    parser = argparse.ArgumentParser(
+        description="QueryConditionCache HDFS Log Analytics benchmark"
     )
     parser.add_argument(
-        "--out", type=str, default=None,
+        "--mode",
+        choices=MODES,
+        required=True,
+        help="Run exactly one cache/page-state measurement mode.",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=3,
+        help="Number of independent measured samples (default: 3)",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
         help="Output file for results (default: auto-generated)",
     )
     parser.add_argument(
-        "--stories", type=str, default=None,
+        "--stories",
+        type=str,
+        default=None,
         help="Comma-separated story numbers to run (e.g. '1,2'). Default: all.",
-    )
-    parser.add_argument(
-        "--individual", action="store_true",
-        help="Also run each query individually with fresh connection (like clickbench mode)",
     )
     parser.add_argument("--no-chart", action="store_true", help="Skip chart generation")
     parser.add_argument(
-        "--regenerate", action="store_true",
+        "--regenerate",
+        action="store_true",
         help="Force re-download/reload of HDFS log data",
     )
     parser.add_argument(
-        "--threads", type=int, default=None,
+        "--threads",
+        type=int,
+        default=None,
         help="Number of DuckDB threads (default: auto)",
     )
     parser.add_argument(
-        "--memory-limit", type=str, default=None,
+        "--memory-limit",
+        type=str,
+        default=None,
         help="DuckDB memory limit (e.g. '4GB')",
     )
     parser.add_argument(
-        "--experiment-name", type=str, default=None,
+        "--experiment-name",
+        type=str,
+        default=None,
         help="Name prefix for output files",
     )
     args = parser.parse_args()
+    if args.repeat < 1:
+        parser.error("--repeat must be at least 1")
 
     # Build output filename
     if args.out:
         out_file = args.out
     else:
-        parts = ["hdfs_logs"]
+        parts = ["hdfs_logs", args.mode]
         if args.threads:
             parts.append(f"t{args.threads}")
         if args.memory_limit:
@@ -617,9 +599,12 @@ def main():
     try:
         import duckdb  # noqa: F401
     except ImportError:
-        print("ERROR: duckdb Python package not found. Run via: uv run benchmark/run_hdfs_log_benchmark.py")
+        print(
+            "ERROR: duckdb Python package not found. Run via: uv run benchmark/run_hdfs_log_benchmark.py"
+        )
         sys.exit(1)
 
+    require_local_extension()
     db_path = ensure_hdfs_data(args)
     print("Data ready.", flush=True)
 
@@ -628,40 +613,46 @@ def main():
         selected = [int(s.strip()) for s in args.stories.split(",")]
     else:
         selected = sorted(STORIES.keys())
+    invalid_stories = [story_id for story_id in selected if story_id not in STORIES]
+    if invalid_stories:
+        parser.error(f"Unknown story IDs: {invalid_stories}")
 
-    # Run story-mode benchmarks
-    all_story_results = {}
-    for story_id in selected:
-        story_name, queries = STORIES[story_id]
-        results = benchmark_story(db_path, args, story_name, queries, args.repeat)
-        all_story_results[story_id] = (story_name, results)
-
-    # Optionally run individual-query mode
-    individual_results = []
-    if args.individual:
-        individual_results = run_individual_queries(db_path, args, args.repeat)
+    results = run_mode(db_path, args, selected)
 
     # Build markdown output
-    mem_note = f", memory_limit={args.memory_limit}" if args.memory_limit else ""
-    threads_note = f", threads={args.threads}" if args.threads else ""
-
+    settings = ", ".join(
+        item
+        for item in [
+            f"threads={args.threads}" if args.threads else "threads=auto",
+            (
+                f"memory_limit={args.memory_limit}"
+                if args.memory_limit
+                else "memory_limit=auto"
+            ),
+        ]
+    )
     lines = [
-        "# QueryConditionCache Benchmark Results — HDFS Log Analytics\n",
-        f"**Settings:**{threads_note}{mem_note}\n",
+        f"# QueryConditionCache HDFS Benchmark — {args.mode}\n",
+        f"**Settings:** {settings}\n",
         "**Dataset:** HDFS_v2 from Zenodo record 8196385 — 31 Hadoop log files,",
         "~71M log lines from a 32-node HDFS cluster (1 namenode + 31 datanodes).\n",
-        f"**Methodology:** Each story runs on a single connection (cache persists across queries).",
-        f"Baseline: {args.repeat} warm runs with cache OFF. Cached: {args.repeat} warm runs with cache ON.",
-        "OS page caches are dropped between baseline and cached passes.",
-        "**Speedup = avg(baseline) / avg(cache hit)**\n",
+        f"**Methodology:** Mode `{args.mode}`; {args.repeat} independent samples per query.",
+        "Every sample starts with an OS page-cache purge and a fresh DuckDB connection.",
     ]
-
-    for story_id in selected:
-        story_name, results = all_story_results[story_id]
-        lines.append(format_table(story_name, results, args.repeat))
-
-    if individual_results:
-        lines.append(format_table("Individual Queries (fresh connection each)", individual_results, args.repeat))
+    if args.mode.startswith("warm-"):
+        lines.append(
+            "Warm state is established by one untimed normal query with the condition cache disabled.\n"
+        )
+    elif args.mode == "cold-cache-hit":
+        lines.append(
+            "The condition cache is built first, then the OS page cache is purged before measurement.\n"
+        )
+    if args.mode in ("cold-build", "warm-build"):
+        lines.append(
+            "The measured query starts with the condition cache enabled and no matching entry; "
+            "its latency includes automatic cache construction and execution of the original query.\n"
+        )
+    lines.append(format_table(args.mode, results, args.repeat))
 
     output = "\n".join(lines)
     print("\n" + output)
@@ -670,9 +661,9 @@ def main():
         f.write(output)
     print(f"\nResults written to {out_file}")
 
-    if not args.no_chart and all_story_results:
+    if not args.no_chart and results:
         chart_path = Path(out_file).with_suffix(".png")
-        plot_results(all_story_results, chart_path)
+        plot_results(results, args.mode, chart_path)
 
 
 if __name__ == "__main__":
