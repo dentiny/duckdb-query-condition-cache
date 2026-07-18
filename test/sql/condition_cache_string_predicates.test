@@ -1,0 +1,144 @@
+# name: test/sql/condition_cache_string_predicates.test
+# description: Test condition cache with related string-prefix expressions
+# group: [sql]
+
+require query_condition_cache
+
+statement ok
+SET use_query_condition_cache = true;
+
+# Spread four matching rows across a table with two row groups. This leaves
+# most vector-sized ranges empty so a cache hit exercises pruning.
+statement ok
+CREATE TABLE string_predicates AS
+SELECT
+    i AS id,
+    CASE
+        WHEN i % 50000 = 0 THEN 'match_' || i::VARCHAR
+        ELSE 'ordinary_' || i::VARCHAR
+    END AS content
+FROM range(200000) t(i);
+
+# starts_with is DuckDB's named alias for the ^@ operator.
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE starts_with(content, 'match');
+----
+4	300000
+
+query IIII
+SELECT *
+FROM condition_cache_info(
+    'string_predicates',
+    'starts_with(content, ''match'')'
+);
+----
+2	2	4	98
+
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE starts_with(content, 'match');
+----
+4	300000
+
+# Test the operator spelling independently. Alias canonicalization across
+# starts_with and ^@ is not required by this test.
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE content ^@ 'match';
+----
+4	300000
+
+query IIII
+SELECT *
+FROM condition_cache_info(
+    'string_predicates',
+    'content ^@ ''match'''
+);
+----
+2	2	4	98
+
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE content ^@ 'match';
+----
+4	300000
+
+# prefix has similar behavior but is registered as a separate DuckDB
+# function rather than an alias.
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE prefix(content, 'match');
+----
+4	300000
+
+query IIII
+SELECT *
+FROM condition_cache_info(
+    'string_predicates',
+    'prefix(content, ''match'')'
+);
+----
+2	2	4	98
+
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE prefix(content, 'match');
+----
+4	300000
+
+# LIKE with a fixed prefix can be rewritten by DuckDB's optimizer, but the
+# condition cache must still preserve the original predicate result.
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE content LIKE 'match%';
+----
+4	300000
+
+query IIII
+SELECT *
+FROM condition_cache_info(
+    'string_predicates',
+    'content LIKE ''match%'''
+);
+----
+2	2	4	98
+
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE content LIKE 'match%';
+----
+4	300000
+
+# left is not an alias. It is a distinct expression that is equivalent for
+# this fixed ASCII prefix and length.
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE left(content, 5) = 'match';
+----
+4	300000
+
+query IIII
+SELECT *
+FROM condition_cache_info(
+    'string_predicates',
+    'left(content, 5) = ''match'''
+);
+----
+2	2	4	98
+
+query II
+SELECT count(*), sum(id)
+FROM string_predicates
+WHERE left(content, 5) = 'match';
+----
+4	300000
