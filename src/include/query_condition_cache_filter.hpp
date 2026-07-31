@@ -3,18 +3,31 @@
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
 
 namespace duckdb {
 
+struct ConditionCacheTableScanBindData : public TableScanBindData {
+	ConditionCacheTableScanBindData(TableCatalogEntry &table, shared_ptr<ConditionCacheProfileInfo> profile_info_p);
+
+	shared_ptr<ConditionCacheProfileInfo> profile_info;
+
+	unique_ptr<FunctionData> Copy() const override;
+};
+
+InsertionOrderPreservingMap<string> ConditionCacheDynamicToString(TableFunctionDynamicToStringInput &input);
+
 // Holds a shared_ptr to the ConditionCacheEntry so the filter function
 // and CheckStatistics can query the cache via ConditionCacheEntry's thread-safe API.
 struct ConditionCacheFilterBindData : public FunctionData {
 	shared_ptr<ConditionCacheEntry> cache_entry;
+	shared_ptr<ConditionCacheProfileInfo> profile_info;
 
-	explicit ConditionCacheFilterBindData(shared_ptr<ConditionCacheEntry> entry);
+	ConditionCacheFilterBindData(shared_ptr<ConditionCacheEntry> entry,
+	                             shared_ptr<ConditionCacheProfileInfo> profile_info_p = nullptr);
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other_p) const override;
@@ -42,8 +55,10 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 class CacheExpressionFilter : public ExpressionFilter {
 public:
 	shared_ptr<ConditionCacheEntry> cache_entry;
+	shared_ptr<ConditionCacheProfileInfo> profile_info;
 
-	CacheExpressionFilter(unique_ptr<Expression> expr, shared_ptr<ConditionCacheEntry> entry);
+	CacheExpressionFilter(unique_ptr<Expression> expr, shared_ptr<ConditionCacheEntry> entry,
+	                      shared_ptr<ConditionCacheProfileInfo> profile_info_p = nullptr);
 
 	FilterPropagateResult CheckStatistics(BaseStatistics &stats) const override;
 	unique_ptr<TableFilter> Copy() const override;

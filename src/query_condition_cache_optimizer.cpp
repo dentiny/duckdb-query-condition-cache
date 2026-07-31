@@ -6,6 +6,7 @@
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -99,21 +100,32 @@ void QueryConditionCacheOptimizer::PreOptimizeWalk(ClientContext &context, uniqu
 		return;
 	}
 
+	auto profile_info = make_shared_ptr<ConditionCacheProfileInfo>();
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(context, key);
 	store->RecordAccess(entry != nullptr);
+	profile_info->initial_lookup_hit.store(entry != nullptr);
 
 	if (!entry) {
 		// TODO: Consider building cache in the background and syncing later
 		// to avoid blocking the first query.
 		entry = BuildCacheForPredicate(context, filter.expressions, get);
 		if (entry) {
+			profile_info->built_this_query.store(true);
 			store->Upsert(context, key, entry);
 		}
 	}
 
 	if (entry) {
-		state.cache_apply_pending[get.table_index] = std::move(entry);
+		auto total_rows = storage.GetTotalRows();
+		auto entry_stats = entry->ComputeStats(total_rows);
+		profile_info->predicate_hash = StringUtil::Format("%llu", Hash(key.filter_key.c_str()));
+		profile_info->cached_row_groups = entry->RowGroupCount();
+		profile_info->qualifying_vectors = entry_stats.qualifying_vectors;
+		profile_info->total_vectors = entry_stats.total_vectors;
+		profile_info->total_rows = total_rows;
+
+		state.cache_apply_pending[get.table_index] = {entry, profile_info};
 	}
 }
 
@@ -178,12 +190,13 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(ClientContext &context, uniq
 		return;
 	}
 
-	InjectCacheFilter(context, get, entry->second);
+	InjectCacheFilter(context, get, entry->second.cache_entry, entry->second.profile_info);
 	state.cache_apply_pending.erase(entry);
 }
 
 void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, LogicalGet &get,
-                                                     const shared_ptr<ConditionCacheEntry> &entry) {
+                                                     const shared_ptr<ConditionCacheEntry> &entry,
+                                                     const shared_ptr<ConditionCacheProfileInfo> &profile_info) {
 	auto &column_ids = get.GetMutableColumnIds();
 	bool has_row_id = false;
 	for (const auto &column_id : column_ids) {
@@ -202,15 +215,26 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, Log
 		column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
 	}
 
+	auto &table_scan_bind_data = get.bind_data->Cast<TableScanBindData>();
+	auto profiled_bind_data = make_uniq<ConditionCacheTableScanBindData>(table_scan_bind_data.table, profile_info);
+	profiled_bind_data->is_index_scan = table_scan_bind_data.is_index_scan;
+	profiled_bind_data->is_create_index = table_scan_bind_data.is_create_index;
+	profiled_bind_data->column_ids = table_scan_bind_data.column_ids;
+	profiled_bind_data->order_options = table_scan_bind_data.order_options
+	                                        ? make_uniq<RowGroupOrderOptions>(*table_scan_bind_data.order_options)
+	                                        : nullptr;
+	get.bind_data = std::move(profiled_bind_data);
+	get.function.dynamic_to_string = ConditionCacheDynamicToString;
+
 	vector<unique_ptr<Expression>> children;
 	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0U));
 
-	auto filter_expr =
-	    make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFunction(),
-	                                       std::move(children), make_uniq<ConditionCacheFilterBindData>(entry));
+	auto filter_expr = make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN},
+	                                                      ConditionCacheFilterFunction(), std::move(children),
+	                                                      make_uniq<ConditionCacheFilterBindData>(entry, profile_info));
 
 	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
-	                             make_uniq<CacheExpressionFilter>(std::move(filter_expr), entry));
+	                             make_uniq<CacheExpressionFilter>(std::move(filter_expr), entry, profile_info));
 }
 
 void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {

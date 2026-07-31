@@ -2,23 +2,73 @@
 
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 
 namespace duckdb {
 
-ConditionCacheFilterBindData::ConditionCacheFilterBindData(shared_ptr<ConditionCacheEntry> entry)
-    : cache_entry(std::move(entry)) {
+namespace {
+
+string GetConditionCacheStatus(const ConditionCacheProfileInfo &profile_info) {
+	if (profile_info.built_this_query.load()) {
+		return "MISS -> BUILT";
+	}
+	if (profile_info.initial_lookup_hit.load()) {
+		return "HIT";
+	}
+	return "MISS";
+}
+
+} // namespace
+
+ConditionCacheTableScanBindData::ConditionCacheTableScanBindData(TableCatalogEntry &table,
+                                                                 shared_ptr<ConditionCacheProfileInfo> profile_info_p)
+    : TableScanBindData(table), profile_info(std::move(profile_info_p)) {
+}
+
+unique_ptr<FunctionData> ConditionCacheTableScanBindData::Copy() const {
+	auto result = make_uniq<ConditionCacheTableScanBindData>(table, profile_info);
+	result->is_index_scan = is_index_scan;
+	result->is_create_index = is_create_index;
+	result->column_ids = column_ids;
+	result->order_options = order_options ? make_uniq<RowGroupOrderOptions>(*order_options) : nullptr;
+	return std::move(result);
+}
+
+InsertionOrderPreservingMap<string> ConditionCacheDynamicToString(TableFunctionDynamicToStringInput &input) {
+	InsertionOrderPreservingMap<string> result;
+	if (!input.bind_data) {
+		return result;
+	}
+
+	auto &bind_data = input.bind_data->Cast<ConditionCacheTableScanBindData>();
+	if (!bind_data.profile_info) {
+		return result;
+	}
+
+	auto &profile_info = *bind_data.profile_info;
+	result["Condition Cache"] = GetConditionCacheStatus(profile_info);
+	result["Condition Cache Predicate Hash"] = profile_info.predicate_hash;
+	result["Condition Cache Cached Row Groups"] = to_string(profile_info.cached_row_groups);
+	result["Condition Cache Qualifying Vectors"] =
+	    StringUtil::Format("%llu/%llu", profile_info.qualifying_vectors, profile_info.total_vectors);
+	return result;
+}
+
+ConditionCacheFilterBindData::ConditionCacheFilterBindData(shared_ptr<ConditionCacheEntry> entry,
+                                                           shared_ptr<ConditionCacheProfileInfo> profile_info_p)
+    : cache_entry(std::move(entry)), profile_info(std::move(profile_info_p)) {
 }
 
 unique_ptr<FunctionData> ConditionCacheFilterBindData::Copy() const {
-	return make_uniq<ConditionCacheFilterBindData>(cache_entry);
+	return make_uniq<ConditionCacheFilterBindData>(cache_entry, profile_info);
 }
 
 bool ConditionCacheFilterBindData::Equals(const FunctionData &other_p) const {
 	auto &other = other_p.Cast<ConditionCacheFilterBindData>();
-	return cache_entry == other.cache_entry;
+	return cache_entry == other.cache_entry && profile_info == other.profile_info;
 }
 
 unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, ScalarFunction &bound_function,
@@ -97,8 +147,9 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	UnaryExecutor::Execute<int64_t, bool>(input_vec, result, args.size(), row_id_passes);
 }
 
-CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, shared_ptr<ConditionCacheEntry> entry)
-    : ExpressionFilter(std::move(expr_p)), cache_entry(std::move(entry)) {
+CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, shared_ptr<ConditionCacheEntry> entry,
+                                             shared_ptr<ConditionCacheProfileInfo> profile_info_p)
+    : ExpressionFilter(std::move(expr_p)), cache_entry(std::move(entry)), profile_info(std::move(profile_info_p)) {
 }
 
 FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &stats) const {
@@ -119,7 +170,7 @@ FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &sta
 }
 
 unique_ptr<TableFilter> CacheExpressionFilter::Copy() const {
-	return make_uniq<CacheExpressionFilter>(expr->Copy(), cache_entry);
+	return make_uniq<CacheExpressionFilter>(expr->Copy(), cache_entry, profile_info);
 }
 
 } // namespace duckdb
