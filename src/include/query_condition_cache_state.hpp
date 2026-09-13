@@ -6,7 +6,6 @@
 
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/bitset.hpp"
-#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/object_cache.hpp"
@@ -43,12 +42,6 @@ struct CacheKey {
 
 	bool operator==(const CacheKey &other) const {
 		return table_oid == other.table_oid && filter_key == other.filter_key;
-	}
-};
-
-struct CacheKeyHashFunction {
-	uint64_t operator()(const CacheKey &key) const {
-		return CombineHash(Hash<idx_t>(key.table_oid), Hash(key.filter_key.c_str()));
 	}
 };
 
@@ -90,13 +83,9 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	bool StatisticsRangeIsAllEmptyCached(idx_t min_rg, idx_t max_rg) const;
 
 	idx_t RowGroupCount() const;
-	bool HasRowGroup(idx_t rg_idx) const;
 	bool RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const;
 	// True iff `rg_idx` is cached and its filter is empty (no qualifying vectors).
 	bool RowGroupIsCompletelyEmpty(idx_t rg_idx) const;
-
-	// Erase row group keys; returns (number of keys removed, whether the map is now empty).
-	pair<idx_t, bool> EraseRowGroups(const unordered_set<idx_t> &row_group_indices);
 
 private:
 	mutable concurrency::mutex lock;
@@ -126,9 +115,6 @@ struct TableFilterKeyIndex : public ObjectCacheEntry {
 
 	// Add a filter key. No-op if it already exists.
 	void Add(const string &filter_key);
-	// Remove a filter key. Assumes the key must appear in the set.
-	void Remove(const string &filter_key);
-	bool IsEmpty();
 	// Transfer ownership of all filter keys out. Clears the internal set.
 	unordered_set<string> Take();
 	// Return a copy of all filter keys without clearing the set.
@@ -164,12 +150,8 @@ public:
 	// Upsert an entry
 	void Upsert(ClientContext &context, const CacheKey &key, shared_ptr<ConditionCacheEntry> entry);
 
-	// Remove specific row groups from all entries for a table. Returns count of row groups removed.
-	idx_t RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
-	                              const unordered_set<idx_t> &row_group_indices);
-
-	// Check if any entries exist for a given table OID
-	bool HasEntriesForTable(ClientContext &context, idx_t table_oid);
+	// Remove every cache entry for a table.
+	void RemoveAllEntriesForTable(ClientContext &context, idx_t table_oid);
 
 	// Clear all cache entries and filter key indices
 	void ClearAll(ClientContext &context);
