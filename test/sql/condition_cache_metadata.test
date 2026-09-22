@@ -1,0 +1,22 @@
+# name: test/sql/condition_cache_metadata.test
+# description: test catalog metadata for query condition cache functions
+# group: [sql]
+
+require query_condition_cache
+
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name IN (
+    '__condition_cache_filter',
+    'condition_cache_build',
+    'condition_cache_info',
+    'condition_cache_reset_stats',
+    'condition_cache_stats'
+)
+AND description IS NOT NULL
+AND examples IS NOT NULL
+AND categories IS NOT NULL
+AND parameters IS NOT NULL;
+----
+5
