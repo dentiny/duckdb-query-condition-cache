@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+### Added
+
+- Add descriptions, examples, categories, and parameter names for all extension
+  functions in `duckdb_functions()`.
+
 ## 0.1.2
 
 ### Fixed
