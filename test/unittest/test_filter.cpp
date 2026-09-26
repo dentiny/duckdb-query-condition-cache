@@ -10,6 +10,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/profiling_node.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -29,6 +30,23 @@ optional_ptr<LogicalGet> FindLogicalGet(LogicalOperator &op) {
 		auto result = FindLogicalGet(*child);
 		if (result) {
 			return result;
+		}
+	}
+	return nullptr;
+}
+
+optional_ptr<ProfilingNode> FindConditionCacheProfilingNode(ProfilingNode &node) {
+	auto &info = node.GetProfilingInfo();
+	if (info.metrics.find(MetricType::EXTRA_INFO) != info.metrics.end()) {
+		auto extra_info = info.GetMetricValue<InsertionOrderPreservingMap<string>>(MetricType::EXTRA_INFO);
+		if (extra_info.find("Condition Cache") != extra_info.end()) {
+			return node;
+		}
+	}
+	for (idx_t i = 0; i < node.GetChildCount(); ++i) {
+		auto child = FindConditionCacheProfilingNode(*node.GetChild(i));
+		if (child) {
+			return child;
 		}
 	}
 	return nullptr;
@@ -134,6 +152,11 @@ TEST_CASE("Optimizer injects cache filter into LogicalGet", "[query_condition_ca
 
 		auto &bind_data = function_expr.bind_info->Cast<ConditionCacheFilterBindData>();
 		REQUIRE(bind_data.cache_entry != nullptr);
+		REQUIRE(bind_data.profile_info != nullptr);
+		REQUIRE(get->function.dynamic_to_string == ConditionCacheDynamicToString);
+
+		auto &scan_bind_data = get->bind_data->Cast<ConditionCacheTableScanBindData>();
+		REQUIRE(scan_bind_data.profile_info != nullptr);
 		return plan;
 	};
 
@@ -168,5 +191,59 @@ TEST_CASE("Optimizer injects cache filter into LogicalGet", "[query_condition_ca
 		REQUIRE(get);
 		REQUIRE(get->table_filters.filters.find(COLUMN_IDENTIFIER_ROW_ID) == get->table_filters.filters.end());
 	}
+}
+
+TEST_CASE("Condition cache profiling extra info is surfaced in explain analyze and JSON profiling",
+          "[query_condition_cache][profile]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	REQUIRE_NO_FAIL(con.Query("LOAD query_condition_cache"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE t AS SELECT i AS id FROM range(500000) t(i)"));
+
+	auto explain_result = con.Query("EXPLAIN ANALYZE SELECT count(*) FROM t WHERE id < 3000");
+	REQUIRE(explain_result);
+	REQUIRE(!explain_result->HasError());
+
+	auto explain_text = explain_result->GetValue(1, 0).ToString();
+	REQUIRE(explain_text.find("Condition Cache") != string::npos);
+	REQUIRE(explain_text.find("MISS -> BUILT") != string::npos);
+
+	con.EnableProfiling();
+	con.context->config.emit_profiler_output = false;
+
+	auto query_result = con.Query("SELECT count(*) FROM t WHERE id < 3000");
+	REQUIRE(query_result);
+	REQUIRE(!query_result->HasError());
+	REQUIRE(query_result->GetValue(0, 0).GetValue<int64_t>() == 3000);
+
+	auto profiling_root = con.GetProfilingTree();
+	REQUIRE(profiling_root);
+
+	auto condition_cache_node = FindConditionCacheProfilingNode(*profiling_root);
+	REQUIRE(condition_cache_node);
+
+	auto extra_info = condition_cache_node->GetProfilingInfo().GetMetricValue<InsertionOrderPreservingMap<string>>(
+	    MetricType::EXTRA_INFO);
+
+	auto status = extra_info.find("Condition Cache");
+	REQUIRE(status != extra_info.end());
+	REQUIRE(status->second == "HIT");
+
+	auto predicate_hash = extra_info.find("Condition Cache Predicate Hash");
+	REQUIRE(predicate_hash != extra_info.end());
+	REQUIRE(!predicate_hash->second.empty());
+
+	auto cached_row_groups = extra_info.find("Condition Cache Cached Row Groups");
+	REQUIRE(cached_row_groups != extra_info.end());
+	REQUIRE(cached_row_groups->second == "5");
+
+	auto qualifying_vectors = extra_info.find("Condition Cache Qualifying Vectors");
+	REQUIRE(qualifying_vectors != extra_info.end());
+	REQUIRE(qualifying_vectors->second == "2/245");
+
+	auto json_profile = con.GetProfilingInformation(ProfilerPrintFormat::JSON);
+	REQUIRE(json_profile.find("Condition Cache") != string::npos);
+	REQUIRE(json_profile.find("HIT") != string::npos);
 }
 } // namespace duckdb
