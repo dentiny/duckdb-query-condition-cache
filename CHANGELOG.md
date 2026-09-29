@@ -2,6 +2,10 @@
 
 ## 0.1.3
 
+### Changed
+
+- Update DuckDB and extension-ci-tools to `v1.5.6`.
+
 ### Added
 
 - Add descriptions, examples, categories, and parameter names for all extension
