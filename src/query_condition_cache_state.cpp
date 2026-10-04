@@ -124,11 +124,6 @@ idx_t ConditionCacheEntry::RowGroupCount() const {
 	return bitvectors.size();
 }
 
-bool ConditionCacheEntry::HasRowGroup(idx_t rg_idx) const {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	return bitvectors.find(rg_idx) != bitvectors.end();
-}
-
 bool ConditionCacheEntry::RowGroupVectorHasQualifyingRows(idx_t rg_idx, idx_t vec_idx) const {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	auto it = bitvectors.find(rg_idx);
@@ -147,31 +142,11 @@ bool ConditionCacheEntry::RowGroupIsCompletelyEmpty(idx_t rg_idx) const {
 	return it->second.IsEmpty();
 }
 
-pair<idx_t, bool> ConditionCacheEntry::EraseRowGroups(const unordered_set<idx_t> &row_group_indices) {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	idx_t removed = 0;
-	for (auto rg_idx : row_group_indices) {
-		removed += bitvectors.erase(rg_idx);
-	}
-	return {removed, bitvectors.empty()};
-}
-
 // ------- TABLE_FILTER_KEY_INDEX -------
 
 void TableFilterKeyIndex::Add(const string &filter_key) {
 	concurrency::lock_guard<concurrency::mutex> guard(lock);
 	filter_keys.insert(filter_key);
-}
-
-void TableFilterKeyIndex::Remove(const string &filter_key) {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	ALWAYS_ASSERT(filter_keys.count(filter_key) > 0);
-	filter_keys.erase(filter_key);
-}
-
-bool TableFilterKeyIndex::IsEmpty() {
-	concurrency::lock_guard<concurrency::mutex> guard(lock);
-	return filter_keys.empty();
 }
 
 unordered_set<string> TableFilterKeyIndex::Take() {
@@ -213,47 +188,27 @@ void ConditionCacheStore::Upsert(ClientContext &context, const CacheKey &key, sh
 	cached_table_oids.insert(key.table_oid);
 }
 
-idx_t ConditionCacheStore::RemoveRowGroupsForTable(ClientContext &context, idx_t table_oid,
-                                                   const unordered_set<idx_t> &row_group_indices) {
+void ConditionCacheStore::RemoveAllEntriesForTable(ClientContext &context, idx_t table_oid) {
 	auto &cache = ObjectCache::GetObjectCache(context);
 
 	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
 	if (!index) {
-		return 0;
+		return;
 	}
 
+	// Take() clears the index, so no key is left pointing at a deleted entry.
 	auto filter_keys = index->Take();
-	idx_t removed_count = 0;
-
 	for (const auto &filter_key : filter_keys) {
 		CacheKey key {table_oid, filter_key};
 		string cache_key = MakeCacheKeyString(key);
-		auto entry = cache.Get<ConditionCacheEntry>(cache_key);
-		if (!entry) {
-			continue;
-		}
-		auto erased = entry->EraseRowGroups(row_group_indices);
-		removed_count += erased.first;
-		if (erased.second) {
-			cache.Delete(cache_key);
-		} else {
-			index->Add(filter_key);
-		}
+		cache.Delete(cache_key);
 	}
 
-	if (index->IsEmpty()) {
-		cache.Delete(MakeFilterKeyIndexKey(table_oid));
+	cache.Delete(MakeFilterKeyIndexKey(table_oid));
+	{
 		concurrency::lock_guard<concurrency::mutex> guard(lock);
 		cached_table_oids.erase(table_oid);
 	}
-
-	return removed_count;
-}
-
-bool ConditionCacheStore::HasEntriesForTable(ClientContext &context, idx_t table_oid) {
-	auto &cache = ObjectCache::GetObjectCache(context);
-	auto index = cache.Get<TableFilterKeyIndex>(MakeFilterKeyIndexKey(table_oid));
-	return index && !index->IsEmpty();
 }
 
 void ConditionCacheStore::ClearAll(ClientContext &context) {

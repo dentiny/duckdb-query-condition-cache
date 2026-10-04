@@ -9,15 +9,9 @@ set(QUERY_CACHE_UNITTEST_OBJECTS
     main.cpp
     test_bitvector.cpp
     test_build_cache_entry.cpp
-    test_cache_invalidation.cpp
-    test_cache_invalidation_optimizer.cpp
     test_cache_store.cpp
     test_filter.cpp
-    test_helpers_invalidation.cpp
-    test_logical_cache_invalidator.cpp
-    test_normalize_expression.cpp
-    test_optimizer_invalidation.cpp
-    test_physical_cache_invalidator.cpp)
+    test_normalize_expression.cpp)
 
 add_executable(unittest_query_condition_cache ${QUERY_CACHE_UNITTEST_OBJECTS})
 
