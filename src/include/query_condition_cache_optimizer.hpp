@@ -10,6 +10,11 @@ namespace duckdb {
 class DuckTableEntry;
 class LogicalGet;
 
+struct PendingCacheApplyData {
+	shared_ptr<ConditionCacheEntry> cache_entry;
+	shared_ptr<ConditionCacheProfileInfo> profile_info;
+};
+
 // Query-scoped state for passing cache entries between pre-optimize and post-optimize phases.
 // Stored in ClientContext::registered_state; automatically cleared on QueryEnd.
 struct CacheOptimizerQueryState : public ClientContextState {
@@ -17,7 +22,7 @@ struct CacheOptimizerQueryState : public ClientContextState {
 
 	// Maps table_index -> cache entry for tables matched during pre-optimize.
 	// Consumed by post-optimize to inject cache filters.
-	unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> cache_apply_pending;
+	unordered_map<idx_t, PendingCacheApplyData> cache_apply_pending;
 
 	void QueryEnd(ClientContext &context, optional_ptr<ErrorData> error) override {
 		cache_apply_pending.clear();
@@ -51,8 +56,8 @@ private:
 	                             CacheOptimizerQueryState &state);
 
 	// Inject a rowid-backed cache filter into a LogicalGet while preserving its visible output.
-	static void InjectCacheFilter(ClientContext &context, LogicalGet &get,
-	                              const shared_ptr<ConditionCacheEntry> &entry);
+	static void InjectCacheFilter(ClientContext &context, LogicalGet &get, const shared_ptr<ConditionCacheEntry> &entry,
+	                              const shared_ptr<ConditionCacheProfileInfo> &profile_info);
 };
 
 } // namespace duckdb

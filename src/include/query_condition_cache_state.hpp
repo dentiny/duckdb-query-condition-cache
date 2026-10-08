@@ -59,6 +59,17 @@ struct CacheEntryStats {
 	idx_t total_row_groups;
 };
 
+struct ConditionCacheProfileInfo {
+	atomic<bool> initial_lookup_hit {false};
+	atomic<bool> built_this_query {false};
+
+	string predicate_hash;
+	idx_t cached_row_groups = 0;
+	idx_t qualifying_vectors = 0;
+	idx_t total_vectors = 0;
+	idx_t total_rows = 0;
+};
+
 // A single cache entry: the bitvectors for one (table, predicate) combination.
 struct ConditionCacheEntry : public ObjectCacheEntry {
 	static string ObjectType() {
