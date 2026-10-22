@@ -36,7 +36,7 @@ Table with name nonexistent does not exist
 statement error
 SELECT * FROM condition_cache_build('t', 'invalid_col = 42');
 ----
-does not contain column invalid_col
+does not contain column "invalid_col"
 
 # Qualified table name with schema
 query I
