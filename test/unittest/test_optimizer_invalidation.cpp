@@ -13,12 +13,19 @@ namespace duckdb {
 namespace {
 
 // DuckDB v2 stores prepared plans in the client context; the handle only owns their name.
-PhysicalCacheInvalidator *FindPreparedInvalidator(Connection &con, const PreparedStatement &prepared) {
+PhysicalOperator &GetPreparedPlan(Connection &con, const PreparedStatement &prepared) {
 	auto &statements = ClientData::Get(*con.context).prepared_statements;
 	auto entry = statements.find(Identifier(prepared.GetName()));
 	REQUIRE(entry != statements.end());
 	REQUIRE(entry->second->physical_plan);
-	return FindInvalidator(entry->second->physical_plan->Root());
+	return entry->second->physical_plan->Root();
+}
+
+// These DML tests require an invalidator; fail the assertion before returning its reference if absent.
+PhysicalCacheInvalidator &FindPreparedInvalidator(Connection &con, const PreparedStatement &prepared) {
+	auto *invalidator = FindInvalidator(GetPreparedPlan(con, prepared));
+	REQUIRE(invalidator);
+	return *invalidator;
 }
 
 } // namespace
@@ -356,10 +363,9 @@ TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for DELETE", "[in
 
 	auto prepared = con.Prepare("DELETE FROM t WHERE id < 10");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindPreparedInvalidator(con, *prepared);
-	REQUIRE(invalidator);
-	REQUIRE(invalidator->mode == CacheInvalidatorMode::INVALIDATE);
-	REQUIRE(invalidator->table_oid == table_oid);
+	auto &invalidator = FindPreparedInvalidator(con, *prepared);
+	REQUIRE(invalidator.mode == CacheInvalidatorMode::INVALIDATE);
+	REQUIRE(invalidator.table_oid == table_oid);
 }
 
 TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for UPDATE", "[invalidation][optimizer]") {
@@ -372,10 +378,9 @@ TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for UPDATE", "[in
 
 	auto prepared = con.Prepare("UPDATE t SET val = 999 WHERE id = 5");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindPreparedInvalidator(con, *prepared);
-	REQUIRE(invalidator);
-	REQUIRE(invalidator->mode == CacheInvalidatorMode::INVALIDATE);
-	REQUIRE(invalidator->table_oid == table_oid);
+	auto &invalidator = FindPreparedInvalidator(con, *prepared);
+	REQUIRE(invalidator.mode == CacheInvalidatorMode::INVALIDATE);
+	REQUIRE(invalidator.table_oid == table_oid);
 }
 
 TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT", "[invalidation][optimizer]") {
@@ -388,11 +393,10 @@ TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT", "[in
 
 	auto prepared = con.Prepare("INSERT INTO t VALUES (1, 2)");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindPreparedInvalidator(con, *prepared);
-	REQUIRE(invalidator);
-	REQUIRE(invalidator->mode == CacheInvalidatorMode::INSERT);
-	REQUIRE(invalidator->table_oid == table_oid);
-	REQUIRE(invalidator->pre_insert_row_count == 0);
+	auto &invalidator = FindPreparedInvalidator(con, *prepared);
+	REQUIRE(invalidator.mode == CacheInvalidatorMode::INSERT);
+	REQUIRE(invalidator.table_oid == table_oid);
+	REQUIRE(invalidator.pre_insert_row_count == 0);
 }
 
 TEST_CASE("Optimizer invalidation - no invalidator for SELECT", "[invalidation][optimizer]") {
@@ -404,8 +408,7 @@ TEST_CASE("Optimizer invalidation - no invalidator for SELECT", "[invalidation][
 
 	auto prepared = con.Prepare("SELECT * FROM t WHERE id < 10");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindPreparedInvalidator(con, *prepared);
-	REQUIRE_FALSE(invalidator);
+	REQUIRE_FALSE(FindInvalidator(GetPreparedPlan(con, *prepared)));
 }
 
 TEST_CASE("Optimizer invalidation - injects MERGE invalidator for INSERT ON CONFLICT", "[invalidation][optimizer]") {
@@ -419,11 +422,10 @@ TEST_CASE("Optimizer invalidation - injects MERGE invalidator for INSERT ON CONF
 
 	auto prepared = con.Prepare("INSERT INTO t VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET val = 20");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindPreparedInvalidator(con, *prepared);
-	REQUIRE(invalidator);
-	REQUIRE(invalidator->mode == CacheInvalidatorMode::MERGE);
-	REQUIRE(invalidator->table_oid == table_oid);
-	REQUIRE(invalidator->pre_insert_row_count == 1);
+	auto &invalidator = FindPreparedInvalidator(con, *prepared);
+	REQUIRE(invalidator.mode == CacheInvalidatorMode::MERGE);
+	REQUIRE(invalidator.table_oid == table_oid);
+	REQUIRE(invalidator.pre_insert_row_count == 1);
 }
 
 TEST_CASE("Optimizer invalidation - injects MERGE invalidator for MERGE", "[invalidation][optimizer]") {
@@ -439,11 +441,10 @@ TEST_CASE("Optimizer invalidation - injects MERGE invalidator for MERGE", "[inva
 	                            "WHEN MATCHED THEN UPDATE SET val = src.val "
 	                            "WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.val)");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindPreparedInvalidator(con, *prepared);
-	REQUIRE(invalidator);
-	REQUIRE(invalidator->mode == CacheInvalidatorMode::MERGE);
-	REQUIRE(invalidator->table_oid == table_oid);
-	REQUIRE(invalidator->pre_insert_row_count == 100);
+	auto &invalidator = FindPreparedInvalidator(con, *prepared);
+	REQUIRE(invalidator.mode == CacheInvalidatorMode::MERGE);
+	REQUIRE(invalidator.table_oid == table_oid);
+	REQUIRE(invalidator.pre_insert_row_count == 100);
 }
 
 TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT SELECT", "[invalidation][optimizer]") {
@@ -457,11 +458,10 @@ TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT SELECT
 
 	auto prepared = con.Prepare("INSERT INTO dst SELECT * FROM src WHERE id < 50");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindPreparedInvalidator(con, *prepared);
-	REQUIRE(invalidator);
-	REQUIRE(invalidator->mode == CacheInvalidatorMode::INSERT);
-	REQUIRE(invalidator->table_oid == table_oid);
-	REQUIRE(invalidator->pre_insert_row_count == 0);
+	auto &invalidator = FindPreparedInvalidator(con, *prepared);
+	REQUIRE(invalidator.mode == CacheInvalidatorMode::INSERT);
+	REQUIRE(invalidator.table_oid == table_oid);
+	REQUIRE(invalidator.pre_insert_row_count == 0);
 }
 
 TEST_CASE("Optimizer invalidation - DML on empty cache is no-op", "[invalidation][optimizer]") {
