@@ -95,7 +95,7 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	const auto last_cache_vector = NumericCast<idx_t>(last_row_id) / STANDARD_VECTOR_SIZE;
 
 	if (first_cache_vector == last_cache_vector) {
-		result.Reference(Value::BOOLEAN(passes), args.size());
+		result.Reference(Value::BOOLEAN(passes), count_t(args.size()));
 		return;
 	}
 
@@ -106,7 +106,7 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	if (last_cache_vector == first_cache_vector + 1) {
 		const auto last_passes = row_id_passes(last_row_id);
 		if (last_passes == passes) {
-			result.Reference(Value::BOOLEAN(passes), args.size());
+			result.Reference(Value::BOOLEAN(passes), count_t(args.size()));
 			return;
 		}
 		UnaryExecutor::Execute<int64_t, bool>(input_vec, result, args.size(), [&](int64_t row_id) {

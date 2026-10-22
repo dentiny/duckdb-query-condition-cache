@@ -17,7 +17,8 @@ unique_ptr<Expression> BindPredicate(ClientContext &context, DuckTableEntry &tab
 	if (predicate_sql.empty() || predicate_sql.find_first_not_of(' ') == string::npos) {
 		return nullptr;
 	}
-	auto parsed_exprs = Parser::ParseExpressionList(predicate_sql);
+	Parser parser(context);
+	auto parsed_exprs = parser.ParseExpressionList(predicate_sql);
 	if (parsed_exprs.empty()) {
 		return nullptr;
 	}

@@ -1,5 +1,9 @@
 # Changelog
 
+### Fixed
+
+- Include storage/vector constants and the expression iterator directly, use the context-aware parser, and pass typed scalar counts in DuckDB v2 builds and unit tests.
+
 ## 0.2.0
 
 ### Changed

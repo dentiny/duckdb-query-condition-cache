@@ -3,10 +3,12 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/bitset.hpp"
+#include "duckdb/common/vector_size.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "duckdb/storage/storage_info.hpp"
 
 #include <string_view>
 

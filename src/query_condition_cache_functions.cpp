@@ -21,6 +21,7 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder/check_binder.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
@@ -436,7 +437,7 @@ unique_ptr<FunctionData> ConditionCacheResetStatsBind(BindScalarFunctionInput &i
 }
 
 void ConditionCacheResetStatsFn(DataChunk &args, ExpressionState &state, Vector &result) {
-	result.Reference(Value::BOOLEAN(true), args.size());
+	result.Reference(Value::BOOLEAN(true), count_t(args.size()));
 }
 
 } // namespace
