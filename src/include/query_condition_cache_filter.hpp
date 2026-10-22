@@ -22,8 +22,7 @@ struct ConditionCacheFilterBindData : public FunctionData {
 
 // Called during plan deserialization/verification when the optimizer's bind data
 // is not available. Returns an empty cache entry that passes all rows through.
-unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, ScalarFunction &bound_function,
-                                                  vector<unique_ptr<Expression>> &arguments);
+unique_ptr<FunctionData> ConditionCacheFilterBind(BindScalarFunctionInput &input);
 
 unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, const BoundFunctionExpression &expr,
                                                         FunctionData *bind_data);
@@ -35,18 +34,5 @@ ScalarFunction ConditionCacheFilterFunction();
 // for that row group + vector index, and returns a constant BOOLEAN for the
 // entire vector. Defaults to true for row groups not in cache.
 void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &result);
-
-// Row-group level pruning via CheckStatistics. If all row groups covered by
-// the stats range are cached and empty, returns FILTER_ALWAYS_FALSE to skip
-// the entire row group. Otherwise returns NO_PRUNING_POSSIBLE.
-class CacheExpressionFilter : public ExpressionFilter {
-public:
-	shared_ptr<ConditionCacheEntry> cache_entry;
-
-	CacheExpressionFilter(unique_ptr<Expression> expr, shared_ptr<ConditionCacheEntry> entry);
-
-	FilterPropagateResult CheckStatistics(BaseStatistics &stats) const override;
-	unique_ptr<TableFilter> Copy() const override;
-};
 
 } // namespace duckdb

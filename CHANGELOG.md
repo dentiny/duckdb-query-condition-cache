@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+### Changed
+
+- Upgrade DuckDB to `v2.0.0` and extension-ci-tools to the latest main commit.
+- Require C++17 and use DuckDB native annotated mutexes and SQL identifiers.
+- Adapt predicate normalization and cache pruning to DuckDB bound scalar functions.
+- Update vector, catalog lookup, and test linkage APIs for DuckDB v2.0.
+
 ## 0.1.3
 
 ### Changed

@@ -14,6 +14,7 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/storage/data_table.hpp"
 
 namespace duckdb {
 
@@ -40,7 +41,7 @@ void QueryConditionCacheOptimizer::PreOptimizeFunction(OptimizerExtensionInput &
 		return;
 	}
 	auto query_state =
-	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
+	    input.context.registered_state->GetOrCreate<CacheOptimizerQueryState>(string(CacheOptimizerQueryState::NAME));
 	query_state->cache_apply_pending.clear();
 	try {
 		PreOptimizeWalk(input.context, plan, /*inside_dml=*/false, *query_state);
@@ -126,10 +127,10 @@ void ConvertColumnRefsToScanRefs(unique_ptr<Expression> &expr, const LogicalGet 
 	if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 		auto &colref = expr->Cast<BoundColumnRefExpression>();
 		auto &column_ids = get.GetColumnIds();
-		auto col_idx = colref.binding.column_index;
+		auto col_idx = colref.Binding().column_index.GetIndex();
 		ALWAYS_ASSERT(col_idx < column_ids.size());
 		auto storage_oid = column_ids[col_idx].GetPrimaryIndex();
-		expr = make_uniq<BoundReferenceExpression>(colref.alias, colref.return_type, storage_oid);
+		expr = make_uniq<BoundReferenceExpression>(colref.GetAlias(), colref.GetReturnType(), storage_oid);
 		return;
 	}
 	ExpressionIterator::EnumerateChildren(
@@ -185,20 +186,21 @@ void QueryConditionCacheOptimizer::PostOptimizeWalk(ClientContext &context, uniq
 void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, LogicalGet &get,
                                                      const shared_ptr<ConditionCacheEntry> &entry) {
 	auto &column_ids = get.GetMutableColumnIds();
-	bool has_row_id = false;
-	for (const auto &column_id : column_ids) {
-		if (column_id.IsRowIdColumn()) {
-			has_row_id = true;
+	optional_idx row_id_index;
+	for (idx_t index = 0; index < column_ids.size(); index++) {
+		if (column_ids[index].IsRowIdColumn()) {
+			row_id_index = index;
 			break;
 		}
 	}
-	if (!has_row_id) {
+	if (!row_id_index.IsValid()) {
 		if (get.projection_ids.empty() && !column_ids.empty()) {
 			get.projection_ids.reserve(column_ids.size());
 			for (idx_t i = 0; i < column_ids.size(); i++) {
-				get.projection_ids.push_back(i);
+				get.projection_ids.emplace_back(i);
 			}
 		}
+		row_id_index = column_ids.size();
 		column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
 	}
 
@@ -206,11 +208,11 @@ void QueryConditionCacheOptimizer::InjectCacheFilter(ClientContext &context, Log
 	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType {LogicalTypeId::BIGINT}, 0U));
 
 	auto filter_expr =
-	    make_uniq<BoundFunctionExpression>(LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFunction(),
-	                                       std::move(children), make_uniq<ConditionCacheFilterBindData>(entry));
+	    make_uniq<BoundFunctionExpression>(BoundScalarFunction(ConditionCacheFilterFunction()), std::move(children),
+	                                       make_uniq<ConditionCacheFilterBindData>(entry));
 
-	get.table_filters.PushFilter(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID),
-	                             make_uniq<CacheExpressionFilter>(std::move(filter_expr), entry));
+	get.table_filters.PushFilter(ProjectionIndex(row_id_index.GetIndex()),
+	                             make_uniq<ExpressionFilter>(std::move(filter_expr)));
 }
 
 void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
@@ -218,7 +220,8 @@ void QueryConditionCacheOptimizer::OptimizeFunction(OptimizerExtensionInput &inp
 		return;
 	}
 
-	auto query_state = input.context.registered_state->Get<CacheOptimizerQueryState>(CacheOptimizerQueryState::NAME);
+	auto query_state =
+	    input.context.registered_state->Get<CacheOptimizerQueryState>(string(CacheOptimizerQueryState::NAME));
 	if (!query_state || query_state->cache_apply_pending.empty()) {
 		return;
 	}

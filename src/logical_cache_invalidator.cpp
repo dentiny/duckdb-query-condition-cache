@@ -32,7 +32,7 @@ PhysicalOperator &LogicalCacheInvalidator::CreatePlan(ClientContext &context, Ph
 	idx_t resolved_row_id_col = row_id_column_index;
 	if (mode == CacheInvalidatorMode::INVALIDATE) {
 		auto &bound_ref = expressions[0]->Cast<BoundReferenceExpression>();
-		resolved_row_id_col = bound_ref.index;
+		resolved_row_id_col = bound_ref.Index();
 	}
 
 	auto &op = planner.Make<PhysicalCacheInvalidator>(table_oid, mode, resolved_row_id_col, pre_insert_row_count,

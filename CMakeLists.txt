@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
 set(TARGET_NAME query_condition_cache)
 
@@ -7,9 +7,14 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
+if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD LESS 17)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 if(UNIX OR APPLE)
   set(CMAKE_CXX_FLAGS
-      "${CMAKE_CXX_FLAGS} -Wno-c++17-extensions -Wno-c++20-extensions -Wunused-variable -Wunused-function"
+      "${CMAKE_CXX_FLAGS} -Wno-c++20-extensions -Wunused-variable -Wunused-function"
   )
 endif()
 
@@ -39,9 +44,16 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
-add_subdirectory(test/unittest)
+if(BUILD_UNITTESTS)
+  add_subdirectory(test/unittest)
+endif()
 
 if(${BUILD_BENCHMARKS})
   add_executable(benchmark_cache_build benchmark/benchmark_cache_build.cpp)
-  target_link_libraries(benchmark_cache_build duckdb ${EXTENSION_NAME})
+  if(PREBUILT_BINARY)
+    target_link_libraries(benchmark_cache_build duckdb_static)
+    link_extension_libraries(benchmark_cache_build "")
+  else()
+    target_link_libraries(benchmark_cache_build duckdb ${EXTENSION_NAME})
+  endif()
 endif()

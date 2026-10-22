@@ -1,6 +1,5 @@
 #include "physical_cache_invalidator.hpp"
 
-#include "concurrency/annotated_lock.hpp"
 #include "query_condition_cache_state.hpp"
 
 #include "duckdb/common/numeric_utils.hpp"
@@ -26,7 +25,7 @@ namespace {
 // For rows with NULL row IDs (unmatched inserts in MERGE), increment inserted_row_count instead.
 void CollectRowGroups(Vector &row_id_vec, idx_t count, CacheInvalidatorGlobalState &state, bool track_nulls) {
 	UnifiedVectorFormat row_id_data;
-	row_id_vec.ToUnifiedFormat(count, row_id_data);
+	row_id_vec.ToUnifiedFormat(row_id_data);
 	auto row_ids = UnifiedVectorFormat::GetData<row_t>(row_id_data);
 
 	// Collect locally first to minimize critical section
@@ -45,7 +44,7 @@ void CollectRowGroups(Vector &row_id_vec, idx_t count, CacheInvalidatorGlobalSta
 		local_row_groups.insert(row_id / DEFAULT_ROW_GROUP_SIZE);
 	}
 
-	concurrency::lock_guard<concurrency::mutex> guard(state.lock);
+	annotated_lock_guard<annotated_mutex> guard(state.lock);
 	state.affected_row_groups.insert(local_row_groups.begin(), local_row_groups.end());
 	state.inserted_row_count += local_inserted;
 }
@@ -64,7 +63,7 @@ OperatorResultType PhysicalCacheInvalidator::Execute(ExecutionContext &context, 
 		CollectRowGroups(input.data[row_id_column_index], input.size(), invalidator_state, /*track_nulls=*/false);
 		break;
 	case CacheInvalidatorMode::INSERT: {
-		concurrency::lock_guard<concurrency::mutex> guard(invalidator_state.lock);
+		annotated_lock_guard<annotated_mutex> guard(invalidator_state.lock);
 		invalidator_state.inserted_row_count += input.size();
 		break;
 	}
@@ -83,7 +82,7 @@ OperatorFinalResultType PhysicalCacheInvalidator::OperatorFinalize(Pipeline &pip
                                                                    OperatorFinalizeInput &input) const {
 	auto &invalidator_state = input.global_state.Cast<CacheInvalidatorGlobalState>();
 
-	concurrency::lock_guard<concurrency::mutex> guard(invalidator_state.lock);
+	annotated_lock_guard<annotated_mutex> guard(invalidator_state.lock);
 	// For INSERT/MERGE modes: compute affected row groups from the inserted row range.
 	// New rows start at pre_insert_row_count and span inserted_row_count rows.
 	if (invalidator_state.inserted_row_count > 0) {

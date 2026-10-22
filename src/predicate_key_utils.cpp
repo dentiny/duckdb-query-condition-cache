@@ -37,19 +37,21 @@ void NormalizeExpressionForCacheKey(Expression &expr) {
 	// Normalize comparison operand order:
 	// - constant and column: put constant on right
 	// - both same kind (both foldable or both non-foldable): sort by ToString
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
-		auto &comp = expr.Cast<BoundComparisonExpression>();
-		bool left_foldable = comp.left->IsFoldable();
-		bool right_foldable = comp.right->IsFoldable();
+	if (BoundComparisonExpression::IsComparison(expr)) {
+		auto &comp = expr.Cast<BoundFunctionExpression>();
+		auto &left = BoundComparisonExpression::LeftMutable(comp);
+		auto &right = BoundComparisonExpression::RightMutable(comp);
+		bool left_foldable = left->IsFoldable();
+		bool right_foldable = right->IsFoldable();
 		if (left_foldable && !right_foldable) {
 			// Constant on left, column on right -> swap
-			std::swap(comp.left, comp.right);
-			comp.type = FlipComparisonExpression(comp.type);
+			std::swap(left, right);
+			BoundComparisonExpression::FlipType(comp);
 		} else if (left_foldable == right_foldable) {
 			// Both same kind -> sort by ToString for canonical ordering
-			if (comp.left->ToString() > comp.right->ToString()) {
-				std::swap(comp.left, comp.right);
-				comp.type = FlipComparisonExpression(comp.type);
+			if (left->ToString() > right->ToString()) {
+				std::swap(left, right);
+				BoundComparisonExpression::FlipType(comp);
 			}
 		}
 		return;
@@ -60,18 +62,18 @@ void NormalizeExpressionForCacheKey(Expression &expr) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
 		auto &conj = expr.Cast<BoundConjunctionExpression>();
 		vector<pair<string, idx_t>> keyed; // (ToString() result, child index)
-		keyed.reserve(conj.children.size());
-		for (idx_t i = 0; i < conj.children.size(); ++i) {
-			keyed.emplace_back(conj.children[i]->ToString(), i);
+		keyed.reserve(conj.GetChildren().size());
+		for (idx_t i = 0; i < conj.GetChildren().size(); ++i) {
+			keyed.emplace_back(conj.GetChildren()[i]->ToString(), i);
 		}
 		sort(keyed.begin(), keyed.end(),
 		     [](const pair<string, idx_t> &a, const pair<string, idx_t> &b) { return a.first < b.first; });
 		vector<unique_ptr<Expression>> sorted_children;
 		sorted_children.reserve(keyed.size());
 		for (auto &[str, idx] : keyed) {
-			sorted_children.push_back(std::move(conj.children[idx]));
+			sorted_children.push_back(std::move(conj.GetChildrenMutable()[idx]));
 		}
-		conj.children = std::move(sorted_children);
+		conj.GetChildrenMutable() = std::move(sorted_children);
 	}
 }
 
@@ -82,10 +84,10 @@ namespace {
 void SetReferenceAliases(Expression &expr, DuckTableEntry &table_entry) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 		auto &ref = expr.Cast<BoundReferenceExpression>();
-		if (ref.alias.empty()) {
+		if (!ref.HasAlias()) {
 			for (const auto &col : table_entry.GetColumns().Physical()) {
-				if (col.Oid() == ref.index) {
-					ref.alias = col.Name();
+				if (col.Oid() == ref.Index()) {
+					ref.SetAlias(col.Name());
 					break;
 				}
 			}
@@ -98,12 +100,7 @@ void SetReferenceAliases(Expression &expr, DuckTableEntry &table_entry) {
 
 unique_ptr<Expression> CombineWithAnd(vector<unique_ptr<Expression>> children) {
 	D_ASSERT(!children.empty());
-	if (children.size() == 1) {
-		return std::move(children[0]);
-	}
-	auto conj = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
-	conj->children = std::move(children);
-	return std::move(conj);
+	return BoundConjunctionExpression::Create(ExpressionType::CONJUNCTION_AND, std::move(children));
 }
 
 string ComputeCanonicalPredicateKey(ClientContext &context, DuckTableEntry &table_entry, const string &predicate_sql) {
@@ -113,10 +110,11 @@ string ComputeCanonicalPredicateKey(ClientContext &context, DuckTableEntry &tabl
 	}
 	// Strip CheckBinder's outer INTEGER cast and restore column aliases so the
 	// result matches the plan binder output for the same predicate.
-	if (bound_expr->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-		auto &cast = bound_expr->Cast<BoundCastExpression>();
-		if (cast.return_type.id() == LogicalTypeId::INTEGER) {
-			bound_expr = std::move(cast.child);
+	if (BoundCastExpression::IsCast(*bound_expr)) {
+		auto &cast = bound_expr->Cast<BoundFunctionExpression>();
+		if (cast.GetReturnType().id() == LogicalTypeId::INTEGER) {
+			auto child = std::move(BoundCastExpression::ChildMutable(cast));
+			bound_expr = std::move(child);
 		}
 	}
 	SetReferenceAliases(*bound_expr, table_entry);
