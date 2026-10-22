@@ -24,7 +24,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 	    context, QualifiedName(Identifier::InvalidCatalog(), Identifier::DefaultSchema(), "t"));
 
 	SECTION("equality predicate") {
-		auto parsed_exprs = Parser::ParseExpressionList("val = 42");
+		auto parsed_exprs = Parser(context).ParseExpressionList("val = 42");
 		auto binder = Binder::CreateBinder(context);
 		physical_index_set_t bound_columns;
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
@@ -40,7 +40,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 	}
 
 	SECTION("selective predicate") {
-		auto parsed_exprs = Parser::ParseExpressionList("id < 3000");
+		auto parsed_exprs = Parser(context).ParseExpressionList("id < 3000");
 		auto binder = Binder::CreateBinder(context);
 		physical_index_set_t bound_columns;
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
@@ -60,7 +60,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 	}
 
 	SECTION("odd values pass, even values don't") {
-		auto parsed_exprs = Parser::ParseExpressionList("val % 2 = 1");
+		auto parsed_exprs = Parser(context).ParseExpressionList("val % 2 = 1");
 		auto binder = Binder::CreateBinder(context);
 		physical_index_set_t bound_columns;
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
@@ -76,7 +76,7 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 	}
 
 	SECTION("no matching rows") {
-		auto parsed_exprs = Parser::ParseExpressionList("id < 0");
+		auto parsed_exprs = Parser(context).ParseExpressionList("id < 0");
 		auto binder = Binder::CreateBinder(context);
 		physical_index_set_t bound_columns;
 		CheckBinder check_binder(*binder, context, "t", table_entry.GetColumns(), bound_columns);
