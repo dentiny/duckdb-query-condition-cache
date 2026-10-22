@@ -3,6 +3,7 @@
 #include "query_condition_cache_extension.hpp"
 #include "test_helpers_invalidation.hpp"
 
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
