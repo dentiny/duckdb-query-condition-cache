@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Update invalidation unit tests to construct Parser with its client context and inspect prepared plans through the context-owned statement registry.
 - Include storage/vector constants and the expression iterator directly, use the context-aware parser, and pass typed scalar counts in DuckDB v2 builds and unit tests.
 
 ## 0.2.0

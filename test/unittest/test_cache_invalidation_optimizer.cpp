@@ -25,7 +25,7 @@ struct InvalidatorExpectation {
 };
 
 unique_ptr<LogicalOperator> OptimizeQuery(Connection &con, const string &sql) {
-	Parser parser;
+	Parser parser(*con.context);
 	parser.ParseQuery(sql);
 	REQUIRE(parser.statements.size() == 1);
 

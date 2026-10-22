@@ -3,11 +3,24 @@
 #include "query_condition_cache_extension.hpp"
 #include "test_helpers_invalidation.hpp"
 
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 
 namespace duckdb {
+namespace {
+
+// DuckDB v2 stores prepared plans in the client context; the handle only owns their name.
+PhysicalCacheInvalidator *FindPreparedInvalidator(Connection &con, const PreparedStatement &prepared) {
+	auto &statements = ClientData::Get(*con.context).prepared_statements;
+	auto entry = statements.find(Identifier(prepared.GetName()));
+	REQUIRE(entry != statements.end());
+	REQUIRE(entry->second->physical_plan);
+	return FindInvalidator(entry->second->physical_plan->Root());
+}
+
+} // namespace
 
 TEST_CASE("Optimizer invalidation - DELETE removes affected row groups from cache", "[invalidation][optimizer]") {
 	DuckDB db(nullptr);
@@ -342,7 +355,7 @@ TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for DELETE", "[in
 
 	auto prepared = con.Prepare("DELETE FROM t WHERE id < 10");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	auto *invalidator = FindPreparedInvalidator(con, *prepared);
 	REQUIRE(invalidator);
 	REQUIRE(invalidator->mode == CacheInvalidatorMode::INVALIDATE);
 	REQUIRE(invalidator->table_oid == table_oid);
@@ -358,7 +371,7 @@ TEST_CASE("Optimizer invalidation - injects ROW_ID invalidator for UPDATE", "[in
 
 	auto prepared = con.Prepare("UPDATE t SET val = 999 WHERE id = 5");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	auto *invalidator = FindPreparedInvalidator(con, *prepared);
 	REQUIRE(invalidator);
 	REQUIRE(invalidator->mode == CacheInvalidatorMode::INVALIDATE);
 	REQUIRE(invalidator->table_oid == table_oid);
@@ -374,7 +387,7 @@ TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT", "[in
 
 	auto prepared = con.Prepare("INSERT INTO t VALUES (1, 2)");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	auto *invalidator = FindPreparedInvalidator(con, *prepared);
 	REQUIRE(invalidator);
 	REQUIRE(invalidator->mode == CacheInvalidatorMode::INSERT);
 	REQUIRE(invalidator->table_oid == table_oid);
@@ -390,7 +403,7 @@ TEST_CASE("Optimizer invalidation - no invalidator for SELECT", "[invalidation][
 
 	auto prepared = con.Prepare("SELECT * FROM t WHERE id < 10");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	auto *invalidator = FindPreparedInvalidator(con, *prepared);
 	REQUIRE_FALSE(invalidator);
 }
 
@@ -405,7 +418,7 @@ TEST_CASE("Optimizer invalidation - injects MERGE invalidator for INSERT ON CONF
 
 	auto prepared = con.Prepare("INSERT INTO t VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET val = 20");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	auto *invalidator = FindPreparedInvalidator(con, *prepared);
 	REQUIRE(invalidator);
 	REQUIRE(invalidator->mode == CacheInvalidatorMode::MERGE);
 	REQUIRE(invalidator->table_oid == table_oid);
@@ -425,7 +438,7 @@ TEST_CASE("Optimizer invalidation - injects MERGE invalidator for MERGE", "[inva
 	                            "WHEN MATCHED THEN UPDATE SET val = src.val "
 	                            "WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.val)");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	auto *invalidator = FindPreparedInvalidator(con, *prepared);
 	REQUIRE(invalidator);
 	REQUIRE(invalidator->mode == CacheInvalidatorMode::MERGE);
 	REQUIRE(invalidator->table_oid == table_oid);
@@ -443,7 +456,7 @@ TEST_CASE("Optimizer invalidation - injects INSERT invalidator for INSERT SELECT
 
 	auto prepared = con.Prepare("INSERT INTO dst SELECT * FROM src WHERE id < 50");
 	REQUIRE_FALSE(prepared->HasError());
-	auto *invalidator = FindInvalidator(prepared->data->physical_plan->Root());
+	auto *invalidator = FindPreparedInvalidator(con, *prepared);
 	REQUIRE(invalidator);
 	REQUIRE(invalidator->mode == CacheInvalidatorMode::INSERT);
 	REQUIRE(invalidator->table_oid == table_oid);
