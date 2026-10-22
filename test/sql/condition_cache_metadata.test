@@ -20,3 +20,21 @@ AND categories IS NOT NULL
 AND parameters IS NOT NULL;
 ----
 5
+
+query TT
+SELECT function_name, parameters
+FROM duckdb_functions()
+WHERE function_name IN (
+    '__condition_cache_filter',
+    'condition_cache_build',
+    'condition_cache_info',
+    'condition_cache_reset_stats',
+    'condition_cache_stats'
+)
+ORDER BY function_name;
+----
+__condition_cache_filter	[row_id]
+condition_cache_build	[table_name, predicate]
+condition_cache_info	[table_name, predicate]
+condition_cache_reset_stats	[]
+condition_cache_stats	[]
