@@ -283,10 +283,10 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	store->Upsert(context, key, std::move(entry));
 
-	output.SetCardinality(1);
-	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
-	                                              stats.qualifying_vectors, stats.total_vectors,
-	                                              stats.qualifying_row_groups, stats.total_row_groups));
+	output.data[0].Append(StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
+	                                         stats.qualifying_vectors, stats.total_vectors, stats.qualifying_row_groups,
+	                                         stats.total_row_groups));
+	output.CheckCardinality(1);
 }
 
 TableFunction ConditionCacheBuildFunction() {
@@ -354,18 +354,18 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(context, key);
 
-	output.SetCardinality(1);
 	if (entry) {
 		auto stats = entry->ComputeStats(bind_data.total_rows);
-		output.data[0].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_row_groups)));
-		output.data[1].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_row_groups)));
-		output.data[2].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_vectors)));
-		output.data[3].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_vectors)));
+		output.data[0].Append(Value::INTEGER(static_cast<int32_t>(stats.qualifying_row_groups)));
+		output.data[1].Append(Value::INTEGER(static_cast<int32_t>(stats.total_row_groups)));
+		output.data[2].Append(Value::INTEGER(static_cast<int32_t>(stats.qualifying_vectors)));
+		output.data[3].Append(Value::INTEGER(static_cast<int32_t>(stats.total_vectors)));
 	} else {
 		for (idx_t col = 0; col < 4; ++col) {
-			output.data[col].SetValue(0, Value::INTEGER(0));
+			output.data[col].Append(Value::INTEGER(0));
 		}
 	}
+	output.CheckCardinality(1);
 }
 
 TableFunction ConditionCacheInfoFunction() {
@@ -410,10 +410,10 @@ void ConditionCacheStatsExecute(ClientContext &context, TableFunctionInput &data
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto stats = store->GetStats(context);
 
-	output.SetCardinality(1);
-	output.data[0].SetValue(0, Value::UBIGINT(stats.total_memory_bytes));
-	output.data[1].SetValue(0, Value::UBIGINT(stats.hit_count));
-	output.data[2].SetValue(0, Value::UBIGINT(stats.access_count));
+	output.data[0].Append(Value::UBIGINT(stats.total_memory_bytes));
+	output.data[1].Append(Value::UBIGINT(stats.hit_count));
+	output.data[2].Append(Value::UBIGINT(stats.access_count));
+	output.CheckCardinality(1);
 }
 
 } // namespace

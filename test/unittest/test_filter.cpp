@@ -118,7 +118,7 @@ TEST_CASE("ConditionCacheFilterFn handles scan vectors crossing cache-vector bou
 
 	DataChunk input;
 	input.Initialize(Allocator::Get(*con.context), {LogicalType {LogicalTypeId::BIGINT}});
-	input.SetCardinality(STANDARD_VECTOR_SIZE);
+	input.SetChildCardinality(STANDARD_VECTOR_SIZE);
 	const auto row_ids = FlatVector::GetData<int64_t>(input.data[0]);
 	for (idx_t idx = 0; idx < STANDARD_VECTOR_SIZE; idx++) {
 		row_ids[idx] = NumericCast<int64_t>(1536 + idx);
