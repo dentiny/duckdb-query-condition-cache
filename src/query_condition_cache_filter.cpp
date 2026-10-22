@@ -21,8 +21,7 @@ bool ConditionCacheFilterBindData::Equals(const FunctionData &other_p) const {
 	return cache_entry == other.cache_entry;
 }
 
-unique_ptr<FunctionData> ConditionCacheFilterBind(ClientContext &context, ScalarFunction &bound_function,
-                                                  vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> ConditionCacheFilterBind(BindScalarFunctionInput &input) {
 	auto empty_entry = make_shared_ptr<ConditionCacheEntry>();
 	return make_uniq<ConditionCacheFilterBindData>(std::move(empty_entry));
 }
@@ -34,22 +33,45 @@ unique_ptr<FunctionLocalState> ConditionCacheFilterInit(ExpressionState &state, 
 	return make_uniq<ConditionCacheFilterState>();
 }
 
+namespace {
+
+FilterPropagateResult ConditionCacheFilterPrune(const FunctionStatisticsPruneInput &input) {
+	auto stats = input.ChildStats(0);
+	if (!input.bind_data || !stats || !NumericStats::HasMinMax(*stats)) {
+		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
+	}
+	const auto min_row = NumericStats::GetMin<int64_t>(*stats);
+	const auto max_row = NumericStats::GetMax<int64_t>(*stats);
+	if (min_row < 0 || max_row < min_row) {
+		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
+	}
+	const auto min_rg = NumericCast<idx_t>(min_row) / DEFAULT_ROW_GROUP_SIZE;
+	const auto max_rg = NumericCast<idx_t>(max_row) / DEFAULT_ROW_GROUP_SIZE;
+	const auto &entry = input.bind_data->Cast<ConditionCacheFilterBindData>().cache_entry;
+	return entry->StatisticsRangeIsAllEmptyCached(min_rg, max_rg) ? FilterPropagateResult::FILTER_ALWAYS_FALSE
+	                                                              : FilterPropagateResult::NO_PRUNING_POSSIBLE;
+}
+
+} // namespace
+
 ScalarFunction ConditionCacheFilterFunction() {
-	return ScalarFunction("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
-	                      LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn, ConditionCacheFilterBind,
-	                      nullptr, nullptr, ConditionCacheFilterInit);
+	ScalarFunction function("__condition_cache_filter", {LogicalType {LogicalTypeId::BIGINT}},
+	                        LogicalType {LogicalTypeId::BOOLEAN}, ConditionCacheFilterFn, ConditionCacheFilterBind,
+	                        nullptr, ConditionCacheFilterInit);
+	function.SetFilterPruneCallback(ConditionCacheFilterPrune);
+	return function;
 }
 
 void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &result) {
 	ALWAYS_ASSERT(args.size() > 0);
 	ALWAYS_ASSERT(args.ColumnCount() > 0);
-	const auto &bind_data = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<ConditionCacheFilterBindData>();
+	const auto &bind_data = state.expr.Cast<BoundFunctionExpression>().BindInfo()->Cast<ConditionCacheFilterBindData>();
 	const auto &entry = bind_data.cache_entry;
 
 	auto &input_vec = args.data[0];
 
 	UnifiedVectorFormat vdata;
-	input_vec.ToUnifiedFormat(args.size(), vdata);
+	input_vec.ToUnifiedFormat(vdata);
 	const auto row_ids = UnifiedVectorFormat::GetData<int64_t>(vdata);
 
 	const auto first_idx = vdata.sel->get_index(0);
@@ -73,7 +95,7 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	const auto last_cache_vector = NumericCast<idx_t>(last_row_id) / STANDARD_VECTOR_SIZE;
 
 	if (first_cache_vector == last_cache_vector) {
-		result.Reference(Value::BOOLEAN(passes));
+		result.Reference(Value::BOOLEAN(passes), args.size());
 		return;
 	}
 
@@ -84,7 +106,7 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 	if (last_cache_vector == first_cache_vector + 1) {
 		const auto last_passes = row_id_passes(last_row_id);
 		if (last_passes == passes) {
-			result.Reference(Value::BOOLEAN(passes));
+			result.Reference(Value::BOOLEAN(passes), args.size());
 			return;
 		}
 		UnaryExecutor::Execute<int64_t, bool>(input_vec, result, args.size(), [&](int64_t row_id) {
@@ -95,31 +117,6 @@ void ConditionCacheFilterFn(DataChunk &args, ExpressionState &state, Vector &res
 
 	// Conservative fallback for unexpected, non-contiguous input.
 	UnaryExecutor::Execute<int64_t, bool>(input_vec, result, args.size(), row_id_passes);
-}
-
-CacheExpressionFilter::CacheExpressionFilter(unique_ptr<Expression> expr_p, shared_ptr<ConditionCacheEntry> entry)
-    : ExpressionFilter(std::move(expr_p)), cache_entry(std::move(entry)) {
-}
-
-FilterPropagateResult CacheExpressionFilter::CheckStatistics(BaseStatistics &stats) const {
-	if (!NumericStats::HasMinMax(stats)) {
-		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
-	}
-
-	auto min_val = NumericStats::GetMin<int64_t>(stats);
-	auto max_val = NumericStats::GetMax<int64_t>(stats);
-
-	idx_t min_rg = NumericCast<idx_t>(min_val) / DEFAULT_ROW_GROUP_SIZE;
-	idx_t max_rg = NumericCast<idx_t>(max_val) / DEFAULT_ROW_GROUP_SIZE;
-
-	if (!cache_entry->StatisticsRangeIsAllEmptyCached(min_rg, max_rg)) {
-		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
-	}
-	return FilterPropagateResult::FILTER_ALWAYS_FALSE;
-}
-
-unique_ptr<TableFilter> CacheExpressionFilter::Copy() const {
-	return make_uniq<CacheExpressionFilter>(expr->Copy(), cache_entry);
 }
 
 } // namespace duckdb

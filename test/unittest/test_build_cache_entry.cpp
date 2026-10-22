@@ -20,7 +20,8 @@ TEST_CASE("BuildCacheEntry - basic predicate", "[build_cache_entry]") {
 
 	auto &context = *con.context;
 	con.BeginTransaction();
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA, "t");
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(
+	    context, QualifiedName(Identifier::InvalidCatalog(), Identifier::DefaultSchema(), "t"));
 
 	SECTION("equality predicate") {
 		auto parsed_exprs = Parser::ParseExpressionList("val = 42");

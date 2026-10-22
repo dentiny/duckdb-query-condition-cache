@@ -2,8 +2,11 @@
 
 #include "query_condition_cache_state.hpp"
 
+#include "duckdb/common/table_index.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+
+#include <string_view>
 
 namespace duckdb {
 
@@ -13,11 +16,11 @@ class LogicalGet;
 // Query-scoped state for passing cache entries between pre-optimize and post-optimize phases.
 // Stored in ClientContext::registered_state; automatically cleared on QueryEnd.
 struct CacheOptimizerQueryState : public ClientContextState {
-	static constexpr const char *NAME = "qcc_optimizer_state";
+	static constexpr std::string_view NAME = "qcc_optimizer_state";
 
 	// Maps table_index -> cache entry for tables matched during pre-optimize.
 	// Consumed by post-optimize to inject cache filters.
-	unordered_map<idx_t, shared_ptr<ConditionCacheEntry>> cache_apply_pending;
+	unordered_map<TableIndex, shared_ptr<ConditionCacheEntry>> cache_apply_pending;
 
 	void QueryEnd(ClientContext &context, optional_ptr<ErrorData> error) override {
 		cache_apply_pending.clear();

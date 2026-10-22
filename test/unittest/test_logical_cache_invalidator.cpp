@@ -16,8 +16,8 @@ TEST_CASE("LogicalCacheInvalidator - INVALIDATE mode constructor", "[logical_inv
 	REQUIRE(op.expressions.size() == 1);
 
 	auto &ref = op.expressions[0]->Cast<BoundReferenceExpression>();
-	REQUIRE(ref.index == 3);
-	REQUIRE(ref.return_type == LogicalType {LogicalTypeId::BIGINT});
+	REQUIRE(ref.Index() == 3);
+	REQUIRE(ref.GetReturnType() == LogicalType {LogicalTypeId::BIGINT});
 }
 
 TEST_CASE("LogicalCacheInvalidator - INSERT mode constructor", "[logical_invalidator]") {

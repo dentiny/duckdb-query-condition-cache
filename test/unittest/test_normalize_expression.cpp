@@ -15,7 +15,8 @@ TEST_CASE("NormalizeExpressionForCacheKey - comparison operand order", "[normali
 
 	auto &context = *con.context;
 	con.BeginTransaction();
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA, "t");
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(
+	    context, QualifiedName(Identifier::InvalidCatalog(), Identifier::DefaultSchema(), "t"));
 
 	SECTION("equality: constant on left is swapped to right") {
 		auto key1 = ComputeCanonicalPredicateKey(context, table_entry, "val = 42");

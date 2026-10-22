@@ -1,15 +1,14 @@
 #pragma once
 
-#include "concurrency/annotated_lock.hpp"
-#include "concurrency/annotated_mutex.hpp"
-#include "concurrency/thread_annotation.hpp"
-
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/bitset.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/object_cache.hpp"
+
+#include <string_view>
 
 namespace duckdb {
 
@@ -99,7 +98,7 @@ struct ConditionCacheEntry : public ObjectCacheEntry {
 	pair<idx_t, bool> EraseRowGroups(const unordered_set<idx_t> &row_group_indices);
 
 private:
-	mutable concurrency::mutex lock;
+	mutable annotated_mutex lock;
 	unordered_map<idx_t, RowGroupFilter> bitvectors DUCKDB_GUARDED_BY(lock); // rg_idx -> bitvector
 };
 
@@ -107,7 +106,7 @@ private:
 // filter_keys have cache entries for a given table, enabling fast
 // invalidation lookup when DML modifies the table.
 struct TableFilterKeyIndex : public ObjectCacheEntry {
-	concurrency::mutex lock;
+	annotated_mutex lock;
 	// Keys that have been cached for this table; entries may have been evicted by LRU.
 	// Absence of a key guarantees it is not cached.
 	unordered_set<string> filter_keys DUCKDB_GUARDED_BY(lock);
@@ -144,7 +143,7 @@ struct CacheStoreStats {
 // Stored in DuckDB's per-database ObjectCache
 class ConditionCacheStore : public ObjectCacheEntry {
 public:
-	static constexpr const char *CACHE_KEY = "query_condition_cache_store";
+	static constexpr std::string_view CACHE_KEY = "query_condition_cache_store";
 
 	static string ObjectType() {
 		return "query_condition_cache_store";
@@ -190,7 +189,7 @@ public:
 	CacheStoreStats GetStats(ClientContext &context) const;
 
 private:
-	mutable concurrency::mutex lock;
+	mutable annotated_mutex lock;
 	// Tracks all table OIDs that have been cached, for ClearAll
 	unordered_set<idx_t> cached_table_oids DUCKDB_GUARDED_BY(lock);
 

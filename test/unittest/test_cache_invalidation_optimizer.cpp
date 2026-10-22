@@ -96,7 +96,7 @@ TEST_CASE("CacheInvalidationOptimizer injects logical invalidators for DML", "[i
 		REQUIRE(invalidator.mode == CacheInvalidatorMode::INVALIDATE);
 		REQUIRE(invalidator.pre_insert_row_count == 0);
 		REQUIRE(invalidator.expressions.size() == 1);
-		REQUIRE(row_id_ref.index + 1 == invalidator.children[0]->GetColumnBindings().size());
+		REQUIRE(row_id_ref.Index() + 1 == invalidator.children[0]->GetColumnBindings().size());
 
 		VerifyCopiedInvalidator(*con.context, *plan, {CacheInvalidatorMode::INVALIDATE, table_oid, 0, 0, 1});
 		con.context->transaction.Commit();

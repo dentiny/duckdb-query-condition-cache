@@ -33,9 +33,7 @@ namespace {
 // ------- condition_cache_build(table_name VARCHAR, predicate VARCHAR) -------
 
 struct ConditionCacheBuildBindData : public TableFunctionData {
-	string catalog;
-	string schema;
-	string table;
+	QualifiedName table_name;
 	string predicate_sql;
 	idx_t table_oid;
 	idx_t total_rows; // total number of rows in the table
@@ -46,18 +44,16 @@ struct ConditionCacheBuildState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> ConditionCacheBuildBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<ConditionCacheBuildBindData>();
 	result->predicate_sql = input.inputs[1].GetValue<string>();
 
 	// Parse qualified table name (supports "table", "schema.table", "catalog.schema.table")
 	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
-	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
-	result->catalog = std::move(qname.catalog);
-	result->schema = std::move(qname.schema);
-	result->table = std::move(qname.name);
+	Binder::BindSchemaOrCatalog(context, qname);
+	result->table_name = std::move(qname);
 
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, result->catalog, result->schema, result->table);
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, result->table_name);
 	result->table_oid = table_entry.oid;
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
 
@@ -75,7 +71,7 @@ unique_ptr<GlobalTableFunctionState> ConditionCacheBuildInit(ClientContext &cont
 void CollectReferencedColumns(Expression &expr, unordered_set<column_t> &column_oids) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 		auto &ref = expr.Cast<BoundReferenceExpression>();
-		column_oids.insert(ref.index);
+		column_oids.insert(ref.Index());
 	}
 	ExpressionIterator::EnumerateChildren(expr,
 	                                      [&](Expression &child) { CollectReferencedColumns(child, column_oids); });
@@ -86,9 +82,9 @@ void CollectReferencedColumns(Expression &expr, unordered_set<column_t> &column_
 void RemapColumnIndices(Expression &expr, const unordered_map<column_t, idx_t> &mapping) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 		auto &ref = expr.Cast<BoundReferenceExpression>();
-		auto it = mapping.find(ref.index);
+		auto it = mapping.find(ref.Index());
 		ALWAYS_ASSERT(it != mapping.end());
-		ref.index = it->second;
+		ref.IndexMutable() = it->second;
 	}
 	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { RemapColumnIndices(child, mapping); });
 }
@@ -119,7 +115,7 @@ public:
 		DataChunk chunk;
 		chunk.Initialize(Allocator::Get(context), scan_types);
 
-		while (storage.NextParallelScan(context, parallel_state, scan_state)) {
+		while (storage.NextParallelScan(context, parallel_state, scan_state).IsValid()) {
 			while (true) {
 				chunk.Reset();
 				storage.Scan(transaction, chunk, scan_state);
@@ -129,7 +125,7 @@ public:
 
 				auto &rowid_vec = chunk.data[rowid_col_idx];
 				UnifiedVectorFormat rowid_data;
-				rowid_vec.ToUnifiedFormat(chunk.size(), rowid_data);
+				rowid_vec.ToUnifiedFormat(rowid_data);
 				auto rowids = UnifiedVectorFormat::GetData<row_t>(rowid_data);
 
 				// Determine row group from first row_id and instantiate its entry
@@ -268,8 +264,7 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 
 	const auto &bind_data = data_p.bind_data->Cast<ConditionCacheBuildBindData>();
 
-	auto &table_entry =
-	    Catalog::GetEntry<DuckTableEntry>(context, bind_data.catalog, bind_data.schema, bind_data.table);
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, bind_data.table_name);
 
 	string canonical_key = ComputeCanonicalPredicateKey(context, table_entry, bind_data.predicate_sql);
 	if (canonical_key.empty()) {
@@ -288,10 +283,10 @@ void ConditionCacheBuildExecute(ClientContext &context, TableFunctionInput &data
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	store->Upsert(context, key, std::move(entry));
 
-	output.SetCardinality(1);
-	output.data[0].SetValue(0, StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
-	                                              stats.qualifying_vectors, stats.total_vectors,
-	                                              stats.qualifying_row_groups, stats.total_row_groups));
+	output.data[0].Append(StringUtil::Format("Cache Built: %llu/%llu vectors, %llu/%llu row groups",
+	                                         stats.qualifying_vectors, stats.total_vectors, stats.qualifying_row_groups,
+	                                         stats.total_row_groups));
+	output.CheckCardinality(1);
 }
 
 TableFunction ConditionCacheBuildFunction() {
@@ -316,14 +311,14 @@ struct ConditionCacheInfoState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> ConditionCacheInfoBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<ConditionCacheInfoBindData>();
 	auto predicate_sql = input.inputs[1].GetValue<string>();
 
 	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
-	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
+	Binder::BindSchemaOrCatalog(context, qname);
 
-	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, qname.catalog, qname.schema, qname.name);
+	auto &table_entry = Catalog::GetEntry<DuckTableEntry>(context, qname);
 	result->table_oid = table_entry.oid;
 	result->total_rows = table_entry.GetStorage().GetTotalRows();
 
@@ -359,18 +354,18 @@ void ConditionCacheInfoExecute(ClientContext &context, TableFunctionInput &data_
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto entry = store->Lookup(context, key);
 
-	output.SetCardinality(1);
 	if (entry) {
 		auto stats = entry->ComputeStats(bind_data.total_rows);
-		output.data[0].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_row_groups)));
-		output.data[1].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_row_groups)));
-		output.data[2].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.qualifying_vectors)));
-		output.data[3].SetValue(0, Value::INTEGER(static_cast<int32_t>(stats.total_vectors)));
+		output.data[0].Append(Value::INTEGER(static_cast<int32_t>(stats.qualifying_row_groups)));
+		output.data[1].Append(Value::INTEGER(static_cast<int32_t>(stats.total_row_groups)));
+		output.data[2].Append(Value::INTEGER(static_cast<int32_t>(stats.qualifying_vectors)));
+		output.data[3].Append(Value::INTEGER(static_cast<int32_t>(stats.total_vectors)));
 	} else {
 		for (idx_t col = 0; col < 4; ++col) {
-			output.data[col].SetValue(0, Value::INTEGER(0));
+			output.data[col].Append(Value::INTEGER(0));
 		}
 	}
+	output.CheckCardinality(1);
 }
 
 TableFunction ConditionCacheInfoFunction() {
@@ -391,7 +386,7 @@ struct ConditionCacheStatsState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> ConditionCacheStatsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("total_memory_bytes");
 	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
 	names.emplace_back("hit_count");
@@ -415,10 +410,10 @@ void ConditionCacheStatsExecute(ClientContext &context, TableFunctionInput &data
 	auto store = ConditionCacheStore::GetOrCreate(context);
 	auto stats = store->GetStats(context);
 
-	output.SetCardinality(1);
-	output.data[0].SetValue(0, Value::UBIGINT(stats.total_memory_bytes));
-	output.data[1].SetValue(0, Value::UBIGINT(stats.hit_count));
-	output.data[2].SetValue(0, Value::UBIGINT(stats.access_count));
+	output.data[0].Append(Value::UBIGINT(stats.total_memory_bytes));
+	output.data[1].Append(Value::UBIGINT(stats.hit_count));
+	output.data[2].Append(Value::UBIGINT(stats.access_count));
+	output.CheckCardinality(1);
 }
 
 } // namespace
@@ -434,15 +429,14 @@ TableFunction ConditionCacheStatsFunction() {
 
 namespace {
 
-unique_ptr<FunctionData> ConditionCacheResetStatsBind(ClientContext &context, ScalarFunction &bound_function,
-                                                      vector<unique_ptr<Expression>> &arguments) {
-	auto store = ConditionCacheStore::GetOrCreate(context);
+unique_ptr<FunctionData> ConditionCacheResetStatsBind(BindScalarFunctionInput &input) {
+	auto store = ConditionCacheStore::GetOrCreate(input.GetClientContext());
 	store->ResetStats();
 	return nullptr;
 }
 
 void ConditionCacheResetStatsFn(DataChunk &args, ExpressionState &state, Vector &result) {
-	result.Reference(Value::BOOLEAN(true));
+	result.Reference(Value::BOOLEAN(true), args.size());
 }
 
 } // namespace

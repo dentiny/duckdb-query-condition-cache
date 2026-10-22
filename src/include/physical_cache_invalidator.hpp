@@ -1,8 +1,7 @@
 #pragma once
 
-#include "concurrency/annotated_mutex.hpp"
-#include "concurrency/thread_annotation.hpp"
-
+#include "duckdb/common/mutex.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 
 namespace duckdb {
@@ -23,7 +22,7 @@ enum class CacheInvalidatorMode : uint8_t {
 // Shared state across parallel Execute() calls. Accumulates affected row groups
 // and inserted row counts under a mutex.
 struct CacheInvalidatorGlobalState : public GlobalOperatorState {
-	concurrency::mutex lock;
+	annotated_mutex lock;
 	unordered_set<idx_t> affected_row_groups DUCKDB_GUARDED_BY(lock);
 	idx_t inserted_row_count DUCKDB_GUARDED_BY(lock) = 0;
 };

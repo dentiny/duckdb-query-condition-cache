@@ -12,7 +12,8 @@ namespace duckdb {
 namespace {
 
 DuckTableEntry &GetDuckTableEntry(ClientContext &context, const string &table_name) {
-	return Catalog::GetEntry<DuckTableEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA, table_name);
+	return Catalog::GetEntry<DuckTableEntry>(
+	    context, QualifiedName(Identifier::InvalidCatalog(), Identifier::DefaultSchema(), Identifier(table_name)));
 }
 
 } // namespace

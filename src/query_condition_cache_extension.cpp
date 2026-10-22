@@ -2,6 +2,7 @@
 
 #include "query_condition_cache_extension.hpp"
 
+#include "duckdb/common/assert.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -29,8 +30,16 @@ FunctionDescription CreateDescription(vector<string> parameter_names, string des
 	return result;
 }
 
+void SetParameterNames(FunctionSignature &signature, const vector<string> &parameter_names) {
+	D_ASSERT(signature.GetParameterCount() == parameter_names.size());
+	for (idx_t index = 0; index < parameter_names.size(); index++) {
+		signature.GetParameter(index).SetName(Identifier(parameter_names[index]));
+	}
+}
+
 void RegisterTableFunction(ExtensionLoader &loader, TableFunction function, vector<string> parameter_names,
                            string description, vector<string> examples, vector<string> categories) {
+	SetParameterNames(function.GetSignature(), parameter_names);
 	CreateTableFunctionInfo info(std::move(function));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	info.descriptions.push_back(CreateDescription(std::move(parameter_names), std::move(description),
@@ -40,6 +49,7 @@ void RegisterTableFunction(ExtensionLoader &loader, TableFunction function, vect
 
 void RegisterScalarFunction(ExtensionLoader &loader, ScalarFunction function, vector<string> parameter_names,
                             string description, vector<string> examples, vector<string> categories) {
+	SetParameterNames(function.GetSignature(), parameter_names);
 	CreateScalarFunctionInfo info(std::move(function));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	info.descriptions.push_back(CreateDescription(std::move(parameter_names), std::move(description),
